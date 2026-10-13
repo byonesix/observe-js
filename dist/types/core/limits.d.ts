@@ -1,0 +1,40 @@
+import type { AttributeInput, Attributes, Json, JsonObject } from './model';
+import { type Scrubber } from './scrub';
+export declare const LIMITS: {
+    readonly attributes: 128;
+    readonly attributeKeyChars: 128;
+    readonly attributeBytes: 4096;
+    readonly contextBytes: 65536;
+    readonly messageBytes: 32768;
+    readonly stringBytes: 8192;
+    readonly nameBytes: 2048;
+    readonly chain: 10;
+    readonly frames: 100;
+    readonly contextDepth: 6;
+    readonly contextItems: 200;
+    readonly contextNodes: 5000;
+    readonly args: 50;
+    readonly capture: 2;
+};
+export declare function utf8Bytes(value: string): number;
+export declare function truncateUtf8(value: string, bytes: number): string;
+export declare function cutUtf8(value: string, bytes: number): string;
+export declare function attributeKey(key: string): string | null;
+export declare function attributes(input: AttributeInput, scrubber: Scrubber): Attributes;
+export declare function boundAttributes(input: Readonly<Record<string, unknown>>): AttributeInput;
+export interface ErrorFields {
+    readonly type: string;
+    readonly message: string;
+    readonly code?: string;
+    readonly stack?: string;
+    readonly cause: unknown;
+    readonly errors?: readonly unknown[];
+}
+export declare function readError(value: unknown): ErrorFields | undefined;
+export declare function safeString(value: unknown): string;
+export declare function toJson(value: unknown, depth?: number): Json;
+export declare function errorSummary(error: ErrorFields): JsonObject;
+export declare function boundContext(context: JsonObject): JsonObject;
+export declare function fitJson<T extends Container>(value: T, bytes: number): T;
+type Container = JsonObject | Json[];
+export {};

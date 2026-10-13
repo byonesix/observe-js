@@ -1,0 +1,525 @@
+// src/react/index.tsx
+import { Component } from "react";
+
+// src/core/ids.ts
+var hex = Array.from({ length: 256 }, (_, i) => i.toString(16).padStart(2, "0"));
+function format(bytes) {
+  let out = "";
+  for (let i = 0; i < 16; i++) {
+    if (i === 4 || i === 6 || i === 8 || i === 10) out += "-";
+    out += hex[bytes[i]];
+  }
+  return out;
+}
+var lastMs = -1;
+var counter = 0;
+function uuidv7(wallMs) {
+  const bytes = new Uint8Array(16);
+  globalThis.crypto.getRandomValues(bytes);
+  let ms = Math.max(0, Math.floor(wallMs));
+  if (ms <= lastMs) {
+    ms = lastMs;
+    counter++;
+    if (counter > 4095) {
+      ms = lastMs + 1;
+      counter = 0;
+    }
+  } else {
+    counter = 0;
+  }
+  lastMs = ms;
+  bytes[0] = Math.floor(ms / 2 ** 40) & 255;
+  bytes[1] = Math.floor(ms / 2 ** 32) & 255;
+  bytes[2] = ms >>> 24 & 255;
+  bytes[3] = ms >>> 16 & 255;
+  bytes[4] = ms >>> 8 & 255;
+  bytes[5] = ms & 255;
+  bytes[6] = 112 | counter >>> 8 & 15;
+  bytes[7] = counter & 255;
+  bytes[8] = 128 | bytes[8] & 63;
+  return format(bytes);
+}
+function micros(wallMs) {
+  return Math.round(wallMs * 1e3);
+}
+var systemClock = {
+  wallMs: () => Date.now(),
+  monoMs: () => globalThis.performance.now()
+};
+
+// src/core/scrub.ts
+var REPLACEMENT = "[scrubbed]";
+var WS = String.raw` \t\n\x0B\f\r`;
+var KEY = String.raw`A-Za-z0-9_.\-\[\]`;
+var HEX_ESCAPE = String.raw`u00(?:0[9adAD]|2[267]|3[ceCE])`;
+var TOKEN_START = String.raw`(?:\b|(?<=\\[nrt]|\\${HEX_ESCAPE}))`;
+var VALUE_BACKSLASH = String.raw`\\(?!u00(?:2[267]|3[ceCE])|(?:[nrt\\]|u000[9adAD])[${KEY}]{1,64}["'\x60]?[ \t]*[=:])`;
+var WORD = String.raw`(?!\/)(?:[^${WS}&,;"'\x60<>(){}\[\]?=\\]|${VALUE_BACKSLASH})+`;
+var NEXT_WORD = String.raw`[ \t]{1,4}(?![A-Za-z0-9_.\-]{1,64}["'\x60]?[${WS}]{0,4}[=:])(?:[^${WS}&,;"'\x60<>(){}\[\]?=:\\]|${VALUE_BACKSLASH})+`;
+var TAIL = String.raw`(?:[^${WS}&,;"'\x60<>(){}\[\]?:\\]|${VALUE_BACKSLASH})*`;
+var atoms = 0;
+function atomic(body) {
+  const name = `atom${atoms++}`;
+  return String.raw`(?=(?<${name}>${body}))\k<${name}>`;
+}
+function anyCase(...words) {
+  return words.map((word) => word.replace(/[a-z]/g, (c) => `[${c}${c.toUpperCase()}]`)).join("|");
+}
+function quoted() {
+  return [
+    String.raw`"${atomic(String.raw`(?:[^"\\\n]+|\\[^\n])*`)}(?:"|(?=\r?\n|$))`,
+    String.raw`'${atomic(String.raw`(?:[^'\\\n]+|\\[^\n])*`)}(?:'|(?=\r?\n|$))`,
+    String.raw`\x60${atomic(String.raw`[^\x60\n]*`)}\x60`,
+    String.raw`\\u0022${atomic(String.raw`(?:[^"\\\n]+|\\(?!u0022)[^\n])*`)}(?:\\u0022|(?=["\r\n]|$))`,
+    String.raw`\\u0027${atomic(String.raw`(?:[^"\\\n]+|\\(?!u0027)[^\n])*`)}(?:\\u0027|(?=["\r\n]|$))`
+  ].join("|");
+}
+var PAIR = new RegExp(
+  String.raw`(?<![${KEY}])(?<key>[${KEY}]{1,64})(?:` + String.raw`(?<sep>["'\x60]?(?:[ \t]*(?:=>|=)|[${WS}](?:${anyCase("like")})[${WS}])[ \t]*)(?<value>${quoted()}|${WORD})` + String.raw`|(?<csep>["'\x60]?[ \t]*:[ \t]*(?:\r?\n[ \t]*)?)(?<cvalue>${quoted()}|(?![${KEY}]{1,64}["'\x60]?[ \t]*[=:])${WORD}(?:${NEXT_WORD}){0,8}))`,
+  "g"
+);
+var COLON_VALUE_WITH_EQUALS = new RegExp(
+  String.raw`(?<![${KEY}])(?<key>[${KEY}]{1,64})(?<separator>["'\x60]?[ \t]*:[ \t]*)` + atomic(String.raw`(?:[^${WS}&,;"'\x60<>(){}\[\]?=:\\]|${VALUE_BACKSLASH})+`) + `=${TAIL}`,
+  "g"
+);
+var SCRUBBED_TAIL = new RegExp(String.raw`\[scrubbed\]=${TAIL}`, "g");
+var XML_ELEMENT = new RegExp(
+  String.raw`(?<head>(?:<|\\u003[cC])(?<key>[A-Za-z0-9_.:-]{1,64})(?:>|\\u003[eE]))` + atomic(String.raw`(?:[^<\\]+|\\(?!u003[cC]))+`) + String.raw`(?<tail>(?:<|\\u003[cC])\/\k<key>(?:>|\\u003[eE]))`,
+  "g"
+);
+var HEADER_PROBE = new RegExp(String.raw`(?<![^\n])[ \t]*(?:[A-Za-z0-9]+(?:-[A-Za-z0-9]+)+|${anyCase("authorization", "cookie", "signature")})[ \t]*:`);
+var HEADER_LINE = new RegExp(
+  String.raw`(?<![^\n])(?<head>[ \t]*(?<key>[A-Za-z0-9]{1,32}(?:-[A-Za-z0-9]{1,32}){1,6}|${anyCase("authorization", "cookie", "signature")})[ \t]*:[ \t]*(?![ \t]))(?<value>[^\r\n]+)(?=\r?\n|$)`,
+  "g"
+);
+var TOKENS = [
+  [/eyJ/i, /(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{4,4096}\.[A-Za-z0-9_-]{4,4096}\.[A-Za-z0-9_-]{0,4096}/g, REPLACEMENT],
+  [/_live_/i, new RegExp(String.raw`${TOKEN_START}(?:sk|rk|pk)_live_[A-Za-z0-9]{6,}`, "g"), REPLACEMENT],
+  [/_test_/i, new RegExp(String.raw`${TOKEN_START}(?:sk|rk|pk)_test_[A-Za-z0-9]{6,}`, "g"), REPLACEMENT],
+  [/_/, new RegExp(String.raw`${TOKEN_START}(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})`, "g"), REPLACEMENT],
+  [/xox/i, new RegExp(String.raw`${TOKEN_START}xox[abpr]-[A-Za-z0-9-]{10,}`, "g"), REPLACEMENT],
+  [/AKIA/i, new RegExp(String.raw`${TOKEN_START}AKIA[0-9A-Z]{16}\b`, "g"), REPLACEMENT],
+  [/AIza/i, new RegExp(String.raw`${TOKEN_START}AIza[0-9A-Za-z_-]{20,}`, "g"), REPLACEMENT],
+  [/AQE/i, new RegExp(String.raw`${TOKEN_START}AQE[^${WS}"'\x60]{40,}`, "g"), REPLACEMENT],
+  [/v/i, /(v[01](?:=|%3D))[A-Za-z0-9]{32,}/gi, `$1${REPLACEMENT}`],
+  // The needle is PHP's: a bare "otp 123456" in text without "in" anywhere is not scanned on either side.
+  [
+    /in/i,
+    new RegExp(String.raw`${TOKEN_START}((?:${anyCase("pin", "otp", "cvc", "cvv", "cvv2", "cvc2")})\b[ \t]{1,4}(?:(?:${anyCase("code", "number", "is")})[ \t]{1,4})?)\d{3,8}\b`, "g"),
+    `$1${REPLACEMENT}`
+  ],
+  [/bot/i, new RegExp(String.raw`${TOKEN_START}bot(\d{5,}):[A-Za-z0-9_-]{20,}`, "g"), `bot$1:${REPLACEMENT}`],
+  [/jsessionid/i, new RegExp(String.raw`;jsessionid=[^;?#\/${WS}"']+`, "gi"), `;jsessionid=${REPLACEMENT}`],
+  [/-u/i, new RegExp(String.raw`([${WS}](?:-u|--user)[${WS}]+[^${WS}:'"]+):[^${WS}'"]+`, "g"), `$1:${REPLACEMENT}`],
+  [/earer/i, new RegExp(String.raw`${TOKEN_START}(Bearer)[${WS}]+[A-Za-z0-9._~+\/-]{1,4096}=*`, "gi"), `$1 ${REPLACEMENT}`],
+  [/asic/i, new RegExp(String.raw`${TOKEN_START}(Basic)[${WS}]+[A-Za-z0-9._~+\/-]{1,4096}=*`, "gi"), `$1 ${REPLACEMENT}`]
+];
+var COOKIE_LINE = new RegExp(String.raw`${TOKEN_START}(?<head>(?:set-)?cookie[${WS}]*:[${WS}]*)(?<value>(?:[^\r\n\\]|\\(?![nr]|u000[ad]))*)`, "gi");
+var COOKIE_PAIR = new RegExp(String.raw`(?<![^=;${WS}])([^=;${WS}]+)=([^;\r\n]*)`, "g");
+var URL = new RegExp(String.raw`\b[a-z][a-z0-9+.\-]{0,20}:\/\/[^${WS}"'\x60<>\[\](){}]+`, "gi");
+var PATH_PROBE = new RegExp(String.raw`(?:^|[${WS}"'\x60(=])\/[^${WS}\/]+\/(?<run>[^${WS}"'\x60<>]{1,16})`, "g");
+var PATH = new RegExp(String.raw`(?<=^|[${WS}"'\x60(=])\/(?!\/)[^${WS}"'\x60<>\[\](){}]+`, "g");
+var URL_PREFIX = new RegExp(String.raw`^(?<scheme>[a-z][a-z0-9+.\-]*:\/\/)?(?:(?<user>[^\/?#@:${WS}]{0,128}):(?<pass>[^\/?#@${WS}]{1,256})@)?`, "i");
+var ESCAPED_KEY_PREFIX = new RegExp(`^(?:[nrt]|${HEX_ESCAPE})`);
+
+// src/core/limits.ts
+var LIMITS = {
+  attributes: 128,
+  attributeKeyChars: 128,
+  attributeBytes: 4096,
+  contextBytes: 65536,
+  messageBytes: 32768,
+  stringBytes: 8192,
+  nameBytes: 2048,
+  chain: 10,
+  frames: 100,
+  contextDepth: 6,
+  contextItems: 200,
+  contextNodes: 5e3,
+  args: 50,
+  capture: 2
+};
+var CUT_TOKEN_BYTES = 1024;
+function utf8Bytes(value) {
+  let bytes = 0;
+  for (let i = 0; i < value.length; i++) {
+    const unit = value.charCodeAt(i);
+    if (unit < 128) bytes += 1;
+    else if (unit < 2048) bytes += 2;
+    else if (unit >= 55296 && unit <= 56319 && i + 1 < value.length && (value.charCodeAt(i + 1) & 64512) === 56320) {
+      bytes += 4;
+      i++;
+    } else bytes += 3;
+  }
+  return bytes;
+}
+function truncateUtf8(value, bytes) {
+  if (value.length <= bytes / 3 || utf8Bytes(value) <= bytes) return value;
+  let used = 0;
+  for (let i = 0; i < value.length; i++) {
+    const unit = value.charCodeAt(i);
+    const pair = unit >= 55296 && unit <= 56319 && i + 1 < value.length && (value.charCodeAt(i + 1) & 64512) === 56320;
+    const size = unit < 128 ? 1 : unit < 2048 ? 2 : pair ? 4 : 3;
+    if (used + size > bytes) return value.slice(0, i);
+    used += size;
+    if (pair) i++;
+  }
+  return value;
+}
+function cutUtf8(value, bytes) {
+  if (value.length <= bytes / 3 || utf8Bytes(value) <= bytes) return value;
+  if (bytes < REPLACEMENT.length) return "";
+  const head = truncateUtf8(value, bytes - REPLACEMENT.length);
+  let start = head.length;
+  while (start > 0 && head.length - start <= CUT_TOKEN_BYTES && !" 	\r\n".includes(head[start - 1])) start--;
+  const partial = Math.min(utf8Bytes(head.slice(start)), CUT_TOKEN_BYTES);
+  return truncateUtf8(head, utf8Bytes(head) - partial) + REPLACEMENT;
+}
+function boundAttributes(input) {
+  const out = {};
+  let count = 0;
+  for (const [key, value] of Object.entries(input)) {
+    if (count >= LIMITS.attributes) break;
+    if (key.length > LIMITS.attributeKeyChars * LIMITS.capture) continue;
+    const kept = value === null || value === void 0 || typeof value === "boolean" || typeof value === "number" && Number.isFinite(value);
+    out[key] = kept ? value : cutUtf8(attributeString(value), LIMITS.attributeBytes * LIMITS.capture);
+    count++;
+  }
+  return out;
+}
+function attributeString(value) {
+  if (value === null || value === void 0) return void 0;
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") return String(value);
+  return JSON.stringify(toJson(value));
+}
+function readError(value) {
+  if (typeof value !== "object" || value === null) return void 0;
+  try {
+    const record = value;
+    const real = value instanceof Error || Object.prototype.toString.call(value) === "[object Error]";
+    const { message, stack, code, name, errors } = record;
+    if (!real && !(typeof message === "string" && typeof stack === "string")) return void 0;
+    const type = errorType(name, real ? constructorName(value) : void 0, stack);
+    return {
+      type,
+      message: typeof message === "string" ? message : message === void 0 ? "" : safeString(message),
+      ...typeof code === "string" || typeof code === "number" ? { code: String(code) } : {},
+      ...typeof stack === "string" ? { stack } : {},
+      cause: record.cause,
+      ...Array.isArray(errors) && (type === "AggregateError" || value instanceof AggregateError) ? { errors } : {}
+    };
+  } catch {
+    return void 0;
+  }
+}
+function errorType(name, constructor, stack) {
+  if (typeof name === "string" && name !== "") {
+    return name === "Error" && constructor !== void 0 && constructor.length > 2 ? constructor : name;
+  }
+  if (constructor !== void 0 && constructor.length > 0) return constructor;
+  const header = typeof stack === "string" ? /^([A-Za-z_$][\w$.]*)(?::|\n|$)/.exec(stack) : null;
+  return header?.[1] ?? "Error";
+}
+function constructorName(value) {
+  const name = value.constructor?.name;
+  return typeof name === "string" && name !== "" ? name : void 0;
+}
+function safeString(value) {
+  try {
+    return String(value);
+  } catch {
+    try {
+      return Object.prototype.toString.call(value);
+    } catch {
+      return "[unprintable]";
+    }
+  }
+}
+function toJson(value, depth = 0) {
+  let budget = LIMITS.contextNodes;
+  const path = /* @__PURE__ */ new Set();
+  const walk = (current, level) => {
+    if (typeof current === "string") return cutUtf8(current, LIMITS.stringBytes * LIMITS.capture);
+    if (typeof current === "number") return Number.isFinite(current) ? current : String(current);
+    if (typeof current === "boolean" || current === null) return current;
+    if (typeof current === "bigint") return String(current);
+    if (typeof current !== "object") return void 0;
+    if (budget-- <= 0) return "[truncated]";
+    if (path.has(current)) return "[Circular]";
+    if (level >= LIMITS.contextDepth) return `[${className(current)}]`;
+    const error = readError(current);
+    if (error) return errorSummary(error);
+    if (current instanceof Date) return Number.isNaN(current.getTime()) ? "Invalid Date" : current.toISOString();
+    if (current instanceof ArrayBuffer || ArrayBuffer.isView(current)) return `[${className(current)}]`;
+    path.add(current);
+    try {
+      return children(current, level);
+    } catch {
+      return `[${className(current)}]`;
+    } finally {
+      path.delete(current);
+    }
+  };
+  const children = (current, level) => {
+    if (Array.isArray(current)) return current.slice(0, LIMITS.contextItems).map((item) => walk(item, level + 1) ?? null);
+    if (current instanceof Set) return Array.from(current).slice(0, LIMITS.contextItems).map((item) => walk(item, level + 1) ?? null);
+    if (current instanceof Map) return object(Array.from(current).map(([key, item]) => [safeString(key), item]), level);
+    const toJSON = current.toJSON;
+    if (typeof toJSON === "function") return walk(toJSON.call(current), level + 1);
+    return object(Object.keys(current).map((key) => [key, current[key]]), level);
+  };
+  const object = (entries, level) => {
+    const out = [];
+    for (const [key, item] of entries.slice(0, LIMITS.contextItems)) {
+      const json = walk(item, level + 1);
+      if (json !== void 0) out.push([key, json]);
+    }
+    return Object.fromEntries(out);
+  };
+  return walk(value, depth) ?? null;
+}
+function errorSummary(error) {
+  return {
+    type: cutUtf8(error.type, LIMITS.nameBytes * LIMITS.capture),
+    message: cutUtf8(error.message, LIMITS.stringBytes * LIMITS.capture),
+    ...error.code === void 0 ? {} : { code: cutUtf8(error.code, LIMITS.nameBytes * LIMITS.capture) }
+  };
+}
+function className(value) {
+  if (Array.isArray(value)) return "Array";
+  try {
+    return constructorName(value) ?? "Object";
+  } catch {
+    return "Object";
+  }
+}
+function fitJson(value, bytes) {
+  return fit(value, bytes)[0];
+}
+function jsonBytes(value) {
+  return utf8Bytes(JSON.stringify(value));
+}
+function fit(data, limit) {
+  const size = jsonBytes(data);
+  if (size <= limit) return [data, size];
+  const list = Array.isArray(data);
+  const entries = list ? data.map((item, i) => [String(i), item]) : Object.entries(data);
+  const keyCost = (key) => list ? 0 : jsonBytes(key) + 1;
+  const costs = entries.map(([key, value], index) => ({ key, value, index, cost: jsonBytes(value) + 1 + keyCost(key) })).sort((a, b) => a.cost - b.cost);
+  const budget = limit - 48;
+  let used = 2;
+  let dropped = 0;
+  const kept = /* @__PURE__ */ new Map();
+  for (const { key, value, index, cost } of costs) {
+    if (used + cost <= budget) {
+      kept.set(index, value);
+      used += cost;
+      continue;
+    }
+    const overhead = 1 + keyCost(key);
+    const room = budget - used - overhead;
+    if (room >= 64 && value !== null && typeof value === "object") {
+      const [fitted, fittedBytes] = fit(value, room);
+      kept.set(index, fitted);
+      used += overhead + fittedBytes;
+    } else if (room >= 64 && typeof value === "string") {
+      kept.set(index, truncateEncoded(value, room));
+      used += overhead + room;
+    } else {
+      dropped++;
+    }
+  }
+  const ordered = entries.flatMap(([key], index) => kept.has(index) ? [[key, kept.get(index)]] : []);
+  let result;
+  if (list) {
+    result = ordered.map(([, value]) => value);
+    if (dropped > 0) result.push(`[${dropped} truncated]`);
+  } else {
+    result = Object.fromEntries(dropped > 0 ? [...ordered, ["observe.truncated", dropped]] : ordered);
+  }
+  const resultBytes = jsonBytes(result);
+  if (resultBytes <= limit) return [result, resultBytes];
+  const fallback = list ? [`[${entries.length} truncated]`] : { "observe.truncated": entries.length };
+  return [fallback, jsonBytes(fallback)];
+}
+function truncateEncoded(value, room) {
+  let bytes = room - 2;
+  let cut = cutUtf8(value, bytes);
+  while (cut !== "" && jsonBytes(cut) > room) {
+    bytes = Math.floor(bytes * 2 / 3);
+    cut = cutUtf8(value, bytes);
+  }
+  return cut;
+}
+
+// src/core/model.ts
+var LEVELS = ["trace", "debug", "info", "notice", "warning", "error", "critical", "alert", "emergency"];
+
+// src/core/stack.ts
+var FRAME = /^\s*at (?:(.+?) \((.+)\)|(.+))$/;
+var STACK_CHARS = 65536;
+var LINE_CHARS = 2048;
+function parseV8Stack(stack) {
+  const frames = [];
+  for (const line of stack.slice(0, STACK_CHARS).split(/\r?\n/)) {
+    if (frames.length >= LIMITS.frames) break;
+    if (line.length > LINE_CHARS) continue;
+    const frame = parseLine(line);
+    if (frame) frames.push(frame);
+  }
+  return frames;
+}
+function parseLine(line) {
+  const match = FRAME.exec(line);
+  if (!match) return void 0;
+  const [, named, inParens, bare] = match;
+  const fn = named?.trim() || "<anonymous>";
+  const place = location(inParens ?? bare.replace(/^async /, ""));
+  return place && { function: fn, ...place };
+}
+function location(raw) {
+  let place = raw.trim();
+  for (let evalAt = /^eval at .*? \((.*)\), .*$/.exec(place); evalAt; evalAt = /^eval at .*? \((.*)\), .*$/.exec(place)) {
+    place = evalAt[1];
+  }
+  if (place === "native" || place === "<anonymous>") return {};
+  const position = /^(.+):(\d+):(\d+)$/.exec(place) ?? /^(.+):(\d+)$/.exec(place);
+  if (!position) return void 0;
+  const [, file, line, column] = position;
+  if (file === "<anonymous>") return {};
+  return { file, line: Number(line), ...column === void 0 ? {} : { column: Number(column) } };
+}
+
+// src/core/capture.ts
+function errorDraft(error, how, env2) {
+  const wall = env2.clock.wallMs();
+  const context = contextOf(how.context);
+  const fields = readError(error);
+  const exceptions = fields ? chain(error, fields, context) : thrown(error, how.mechanism, context);
+  return {
+    kind: "error",
+    id: uuidv7(wall),
+    time_us: micros(wall),
+    handled: how.handled,
+    mechanism: how.mechanism,
+    exceptions,
+    ...how.groupingKey === void 0 ? {} : { grouping_key: cutUtf8(how.groupingKey, LIMITS.nameBytes * LIMITS.capture) },
+    attributes: boundAttributes(how.attributes ?? {}),
+    context: fitJson(context, LIMITS.contextBytes * LIMITS.capture)
+  };
+}
+function chain(error, first, context) {
+  const exceptions = [exception(first)];
+  const seen = /* @__PURE__ */ new Set([error]);
+  const aggregate = [];
+  let current = first;
+  while (exceptions.length < LIMITS.chain) {
+    const next = current.errors ? current.errors[0] : current.cause;
+    for (const other of current.errors?.slice(1, LIMITS.contextItems) ?? []) aggregate.push(summary(other));
+    if (next === void 0 || next === null || seen.has(next)) break;
+    seen.add(next);
+    const fields = readError(next);
+    if (!fields) {
+      context.cause = toJson(next, 1);
+      break;
+    }
+    exceptions.push(exception(fields));
+    current = fields;
+  }
+  if (aggregate.length > 0) context.aggregate = aggregate;
+  return exceptions;
+}
+function exception(fields) {
+  return {
+    type: cutUtf8(fields.type, LIMITS.nameBytes * LIMITS.capture),
+    message: cutUtf8(fields.message, LIMITS.messageBytes * LIMITS.capture),
+    ...fields.code === void 0 ? {} : { code: cutUtf8(fields.code, LIMITS.nameBytes * LIMITS.capture) },
+    frames: fields.stack === void 0 ? [] : parseV8Stack(fields.stack)
+  };
+}
+function summary(value) {
+  const fields = readError(value);
+  return fields ? errorSummary(fields) : { type: "NonErrorThrow", message: cutUtf8(safeString(value), LIMITS.stringBytes * LIMITS.capture) };
+}
+function thrown(value, mechanism, context) {
+  context.thrown = toJson(value, 1);
+  return [
+    {
+      type: mechanism === "unhandledrejection" ? "UnhandledRejection" : "NonErrorThrow",
+      message: cutUtf8(safeString(value), LIMITS.messageBytes * LIMITS.capture),
+      frames: []
+    }
+  ];
+}
+function contextOf(context) {
+  if (context === void 0) return {};
+  const json = toJson(context);
+  return json !== null && typeof json === "object" && !Array.isArray(json) ? json : { value: json };
+}
+var SEVERE = LEVELS.indexOf("error");
+
+// src/core/hub.ts
+var MAX_PENDING = 100;
+var REGISTRY_KEY = Symbol.for("observe-js.hub");
+function registry() {
+  const slot = globalThis;
+  let current = slot[REGISTRY_KEY];
+  if (!current) {
+    current = { hub: null, pending: [] };
+    slot[REGISTRY_KEY] = current;
+  }
+  return current;
+}
+var preInitHub = {
+  submit(draft) {
+    return defer((hub) => hub.submit(draft));
+  },
+  setAttributes(attributes) {
+    defer((hub) => hub.setAttributes(attributes));
+  },
+  flush() {
+    return Promise.resolve(false);
+  }
+};
+function defer(call) {
+  const { pending } = registry();
+  if (pending.length >= MAX_PENDING) return false;
+  pending.push(call);
+  return true;
+}
+function currentHub() {
+  return registry().hub ?? preInitHub;
+}
+var env = { clock: systemClock };
+function captureError(error, how, hub = currentHub()) {
+  try {
+    const draft = errorDraft(error, how, env);
+    return hub.submit(draft) ? draft.id : void 0;
+  } catch {
+    return void 0;
+  }
+}
+
+// src/react/index.tsx
+var ErrorBoundary = class extends Component {
+  state = { caught: false };
+  static getDerivedStateFromError(error) {
+    return { caught: true, error };
+  }
+  componentDidCatch(error, info) {
+    captureError(error, { mechanism: "error_boundary", handled: true, context: { react: { component_stack: info.componentStack ?? "" } } });
+    this.props.onError?.(error, info);
+  }
+  reset = () => {
+    this.setState({ caught: false });
+  };
+  render() {
+    if (!this.state.caught) return this.props.children;
+    const { fallback } = this.props;
+    return typeof fallback === "function" ? fallback({ error: this.state.error, reset: this.reset }) : fallback;
+  }
+};
+export {
+  ErrorBoundary
+};
