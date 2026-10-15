@@ -79,7 +79,7 @@ export declare class Journal {
     private maintaining;
     private drops;
     constructor(store: SegmentStore, resourceJson: string, policy: JournalPolicy, clock: Clock);
-    append(cls: SegmentClass, line: JournalLine): void;
+    append(cls: SegmentClass, line: JournalLine): boolean;
     tick(): void;
     sealAll(): Promise<void>;
     syncAllNow(): void;
@@ -93,7 +93,7 @@ export declare class Journal {
     private create;
     private scheduleSync;
     private sync;
-    private seal;
+    seal(cls: SegmentClass): Promise<void>;
     private finishSeal;
     private forget;
     private owned;

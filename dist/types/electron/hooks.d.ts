@@ -1,10 +1,11 @@
 import type { App } from 'electron';
 import type { ErrorHow, LogCall } from '../core/capture';
-import type { ErrorDraft, Level, ProcessKind } from '../core/model';
+import type { ErrorDraft, Level, Owner, ProcessKind } from '../core/model';
 export interface HookClient {
     captureError(process: ProcessKind, error: unknown, how: ErrorHow): string | undefined;
-    record(process: ProcessKind, draft: ErrorDraft): boolean;
+    record(process: ProcessKind, draft: ErrorDraft, owner?: Owner): boolean;
     logCall(process: ProcessKind, call: LogCall): void;
+    interrupt(owner: number): void;
     syncNow(): void;
 }
 export type ProcessLike = Pick<NodeJS.Process, 'on' | 'execArgv' | 'env' | 'pid'>;

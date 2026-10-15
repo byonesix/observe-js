@@ -32,7 +32,8 @@ var LEVELS = ["trace", "debug", "info", "notice", "warning", "error", "critical"
 var CHANNEL = {
   post: "observe:v1:post",
   hello: "observe:v1:hello",
-  flush: "observe:v1:flush"
+  flush: "observe:v1:flush",
+  clock: "observe:v1:clock"
 };
 var BRIDGE_GLOBAL = "__observe";
 var MAX_MESSAGE_BYTES = 1024 * 1024;
@@ -44,7 +45,12 @@ function exposeObserve() {
     version: 1,
     post: (message) => import_electron.ipcRenderer.send(CHANNEL.post, message),
     hello: () => import_electron.ipcRenderer.invoke(CHANNEL.hello),
-    flush: (options) => import_electron.ipcRenderer.invoke(CHANNEL.flush, options)
+    flush: (options) => import_electron.ipcRenderer.invoke(CHANNEL.flush, options),
+    onClock: (listener) => {
+      import_electron.ipcRenderer.on(CHANNEL.clock, (_event, offsetMs) => {
+        if (typeof offsetMs === "number" && Number.isFinite(offsetMs)) listener(offsetMs);
+      });
+    }
   };
   if (process.contextIsolated) import_electron.contextBridge.exposeInMainWorld(BRIDGE_GLOBAL, bridge);
   else globalThis[BRIDGE_GLOBAL] = bridge;

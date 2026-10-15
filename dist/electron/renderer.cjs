@@ -21,6 +21,8 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 var renderer_exports = {};
 __export(renderer_exports, {
   captureException: () => captureException,
+  currentSessionHeaders: () => currentSessionHeaders,
+  defineSession: () => defineSession,
   flush: () => flush,
   init: () => init,
   log: () => log,
@@ -40,11 +42,12 @@ function format(bytes) {
 }
 var lastMs = -1;
 var counter = 0;
+var MAX_HOLD_MS = 1e3;
 function uuidv7(wallMs) {
   const bytes = new Uint8Array(16);
   globalThis.crypto.getRandomValues(bytes);
   let ms = Math.max(0, Math.floor(wallMs));
-  if (ms <= lastMs) {
+  if (ms <= lastMs && lastMs - ms <= MAX_HOLD_MS) {
     ms = lastMs;
     counter++;
     if (counter > 4095) {
@@ -223,9 +226,9 @@ function attributeString(value) {
 function readError(value) {
   if (typeof value !== "object" || value === null) return void 0;
   try {
-    const record2 = value;
+    const record3 = value;
     const real = value instanceof Error || Object.prototype.toString.call(value) === "[object Error]";
-    const { message, stack, code, name, errors } = record2;
+    const { message, stack, code, name, errors } = record3;
     if (!real && !(typeof message === "string" && typeof stack === "string")) return void 0;
     const type = errorType(name, real ? constructorName(value) : void 0, stack);
     return {
@@ -233,7 +236,7 @@ function readError(value) {
       message: typeof message === "string" ? message : message === void 0 ? "" : safeString(message),
       ...typeof code === "string" || typeof code === "number" ? { code: String(code) } : {},
       ...typeof stack === "string" ? { stack } : {},
-      cause: record2.cause,
+      cause: record3.cause,
       ...Array.isArray(errors) && (type === "AggregateError" || value instanceof AggregateError) ? { errors } : {}
     };
   } catch {
@@ -358,15 +361,15 @@ function fit(data, limit) {
     }
   }
   const ordered = entries.flatMap(([key], index) => kept.has(index) ? [[key, kept.get(index)]] : []);
-  let result;
+  let result2;
   if (list) {
-    result = ordered.map(([, value]) => value);
-    if (dropped > 0) result.push(`[${dropped} truncated]`);
+    result2 = ordered.map(([, value]) => value);
+    if (dropped > 0) result2.push(`[${dropped} truncated]`);
   } else {
-    result = Object.fromEntries(dropped > 0 ? [...ordered, ["observe.truncated", dropped]] : ordered);
+    result2 = Object.fromEntries(dropped > 0 ? [...ordered, ["observe.truncated", dropped]] : ordered);
   }
-  const resultBytes = jsonBytes(result);
-  if (resultBytes <= limit) return [result, resultBytes];
+  const resultBytes = jsonBytes(result2);
+  if (resultBytes <= limit) return [result2, resultBytes];
   const fallback = list ? [`[${entries.length} truncated]`] : { "observe.truncated": entries.length };
   return [fallback, jsonBytes(fallback)];
 }
@@ -419,8 +422,8 @@ function location(raw) {
 }
 
 // src/core/capture.ts
-function errorDraft(error, how, env3) {
-  const wall = env3.clock.wallMs();
+function errorDraft(error, how, env) {
+  const wall = env.clock.wallMs();
   const context = contextOf(how.context);
   const fields = readError(error);
   const exceptions = fields ? chain(error, fields, context) : thrown(error, how.mechanism, context);
@@ -432,6 +435,7 @@ function errorDraft(error, how, env3) {
     mechanism: how.mechanism,
     exceptions,
     ...how.groupingKey === void 0 ? {} : { grouping_key: cutUtf8(how.groupingKey, LIMITS.nameBytes * LIMITS.capture) },
+    ...how.session === void 0 ? {} : { session: how.session },
     attributes: boundAttributes(how.attributes ?? {}),
     context: fitJson(context, LIMITS.contextBytes * LIMITS.capture)
   };
@@ -485,8 +489,8 @@ function contextOf(context) {
   return json2 !== null && typeof json2 === "object" && !Array.isArray(json2) ? json2 : { value: json2 };
 }
 var SEVERE = LEVELS.indexOf("error");
-function fromLogCall(call, env3) {
-  const wall = call.wallMs ?? env3.clock.wallMs();
+function fromLogCall(call, env) {
+  const wall = call.wallMs ?? env.clock.wallMs();
   const severe = LEVELS.indexOf(call.level) >= SEVERE;
   const text2 = [];
   const args = [];
@@ -510,8 +514,8 @@ function fromLogCall(call, env3) {
   const channel = explicit ?? (firstString === void 0 ? void 0 : channelOf(firstString));
   const linked = error === void 0 ? void 0 : errorDraft(
     error,
-    { mechanism: "log", handled: true, attributes: call.attributes, context: call.context },
-    { clock: { wallMs: () => wall, monoMs: () => env3.clock.monoMs() } }
+    { mechanism: "log", handled: true, attributes: call.attributes, context: call.context, session: call.session },
+    { clock: { wallMs: () => wall, monoMs: () => env.clock.monoMs() } }
   );
   const log2 = {
     kind: "log",
@@ -522,6 +526,7 @@ function fromLogCall(call, env3) {
     ...args.length > 0 ? { args: fitJson(args, LIMITS.messageBytes * LIMITS.capture) } : {},
     ...channel === void 0 ? {} : { channel },
     ...linked === void 0 ? {} : { error_id: linked.id },
+    ...call.session === void 0 ? {} : { session: call.session },
     attributes: boundAttributes(call.attributes ?? {}),
     context: fitJson(contextOf(call.context), LIMITS.contextBytes * LIMITS.capture)
   };
@@ -530,6 +535,105 @@ function fromLogCall(call, env3) {
 function channelOf(message) {
   const tag = /^\s*\[([A-Za-z0-9_.:-]{1,64})\]/.exec(message)?.[1];
   return tag !== void 0 && /[A-Za-z]/.test(tag) ? tag.toLowerCase() : void 0;
+}
+
+// src/core/clock.ts
+function offsetClock(base, offsetMs) {
+  return { wallMs: () => base.wallMs() + offsetMs(), monoMs: () => base.monoMs() };
+}
+
+// src/core/sessions.ts
+var SESSION_LIMITS = {
+  open: 64,
+  events: 2e3,
+  steps: 16,
+  typeBytes: 32,
+  minAbandonMs: 6e4,
+  maxAbandonMs: 24 * 36e5,
+  defaultAbandonMs: 10 * 6e4,
+  maxOffsetMs: 4294967295
+};
+var TOKEN = /^[a-z0-9_]{1,64}$/;
+var UUIDV7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+var CURRENCY = /^[A-Z]{3}$/;
+function parseToken(raw) {
+  return typeof raw === "string" && TOKEN.test(raw) ? raw : null;
+}
+function parseSessionType(raw) {
+  const token = parseToken(raw);
+  return token !== null && token.length <= SESSION_LIMITS.typeBytes ? token : null;
+}
+function parseSessionId(raw) {
+  return typeof raw === "string" && UUIDV7.test(raw) ? raw : null;
+}
+function parseStepKey(raw) {
+  if (typeof raw !== "string") return null;
+  if (raw === "end:completed" || raw === "end:left") return raw;
+  const [kind, name, ...rest] = raw.split(":");
+  return rest.length === 0 && (kind === "screen" || kind === "action") && parseToken(name) !== null ? raw : null;
+}
+function parseSteps(raw) {
+  if (!Array.isArray(raw) || raw.length < 1 || raw.length > SESSION_LIMITS.steps) return null;
+  const steps = raw.map(parseStepKey);
+  if (steps.some((step) => step === null) || new Set(steps).size !== steps.length) return null;
+  return steps;
+}
+function parseAbandonAfterMs(raw) {
+  if (raw === void 0) return SESSION_LIMITS.defaultAbandonMs;
+  return typeof raw === "number" && Number.isInteger(raw) && raw >= SESSION_LIMITS.minAbandonMs && raw <= SESSION_LIMITS.maxAbandonMs ? raw : null;
+}
+function record(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? value : null;
+}
+function optional(raw, parse) {
+  return raw === void 0 ? void 0 : parse(raw);
+}
+var finite = (raw) => typeof raw === "number" && Number.isFinite(raw) ? raw : null;
+var money = (raw) => typeof raw === "number" && Number.isFinite(raw) && raw >= 0 ? raw : null;
+var currency = (raw) => typeof raw === "string" && CURRENCY.test(raw) ? raw : null;
+var result = (raw) => raw === "completed" || raw === "left" ? raw : null;
+function parseSessionMessage(value) {
+  const raw = record(value);
+  const id = parseSessionId(raw?.id);
+  if (raw === null || id === null) return null;
+  switch (raw.op) {
+    case "start": {
+      const type = parseSessionType(raw.type);
+      const steps = parseSteps(raw.steps);
+      const abandonAfterMs = parseAbandonAfterMs(raw.abandonAfterMs);
+      if (type === null || steps === null || abandonAfterMs === null || typeof raw.concurrent !== "boolean") return null;
+      return { op: "start", id, type, steps, abandonAfterMs, concurrent: raw.concurrent };
+    }
+    case "screen": {
+      const name = parseToken(raw.name);
+      return name === null ? null : { op: "screen", id, name };
+    }
+    case "action": {
+      const name = parseToken(raw.name);
+      const variant = optional(raw.variant, parseToken);
+      const value2 = optional(raw.value, finite);
+      if (name === null || variant === null || value2 === null) return null;
+      return { op: "action", id, name, ...variant !== void 0 && { variant }, ...value2 !== void 0 && { value: value2 } };
+    }
+    case "end": {
+      const ending = result(raw.result);
+      const reason = optional(raw.reason, parseToken);
+      const value2 = optional(raw.value, money);
+      const code = optional(raw.currency, currency);
+      if (ending === null || reason === null || value2 === null || code === null) return null;
+      if (ending === "left" && reason === void 0 || code !== void 0 && value2 === void 0) return null;
+      return {
+        op: "end",
+        id,
+        result: ending,
+        ...reason !== void 0 && { reason },
+        ...value2 !== void 0 && { value: value2 },
+        ...code !== void 0 && { currency: code }
+      };
+    }
+    default:
+      return null;
+  }
 }
 
 // src/core/hub.ts
@@ -545,9 +649,14 @@ function registry() {
   return current;
 }
 var preInitHub = {
+  clock: systemClock,
   submit(draft) {
     return defer((hub) => hub.submit(draft));
   },
+  session(message) {
+    return defer((hub) => hub.session(message));
+  },
+  ambient: () => void 0,
   setAttributes(attributes) {
     defer((hub) => hub.setAttributes(attributes));
   },
@@ -562,7 +671,10 @@ function defer(call) {
   return true;
 }
 var disabledHub = {
+  clock: systemClock,
   submit: () => false,
+  session: () => false,
+  ambient: () => void 0,
   setAttributes: () => {
   },
   flush: () => Promise.resolve(false)
@@ -582,14 +694,17 @@ function installHub(hub) {
 function currentHub() {
   return registry().hub ?? preInitHub;
 }
-var env = { clock: systemClock };
 function captureError(error, how, hub = currentHub()) {
   try {
-    const draft = errorDraft(error, how, env);
+    const draft = errorDraft(error, how, hub);
     return hub.submit(draft) ? draft.id : void 0;
   } catch {
     return void 0;
   }
+}
+function sessionOf(ref) {
+  if (ref === null) return null;
+  return parseSessionId(ref?.id) ?? void 0;
 }
 function captureException(error, options) {
   return captureError(error, {
@@ -597,7 +712,8 @@ function captureException(error, options) {
     handled: options?.handled ?? true,
     attributes: options?.attributes,
     context: options?.context,
-    groupingKey: options?.groupingKey
+    groupingKey: options?.groupingKey,
+    session: sessionOf(options?.session)
   });
 }
 function submitLog(submit, [log2, linked]) {
@@ -611,7 +727,10 @@ function submitLog(submit, [log2, linked]) {
 function log(level, message, options) {
   try {
     const hub = currentHub();
-    submitLog((draft) => hub.submit(draft), fromLogCall({ level, args: [message], channel: options?.channel, attributes: options?.attributes, context: options?.context }, env));
+    submitLog(
+      (draft) => hub.submit(draft),
+      fromLogCall({ level, args: [message], channel: options?.channel, attributes: options?.attributes, context: options?.context, session: sessionOf(options?.session) }, hub)
+    );
   } catch {
   }
 }
@@ -629,6 +748,109 @@ function flush(options) {
   }
 }
 
+// src/core/define-session.ts
+var open = [];
+var warned = /* @__PURE__ */ new Set();
+function warnOnce(message) {
+  if (warned.has(message) || warned.size >= 100) return;
+  warned.add(message);
+  try {
+    console.warn(message);
+  } catch {
+  }
+}
+var hex2 = (bytes) => Array.from(globalThis.crypto.getRandomValues(new Uint8Array(bytes)), (byte) => byte.toString(16).padStart(2, "0")).join("");
+function sessionHeaders(id) {
+  return { traceparent: `00-${hex2(16)}-${hex2(8)}-00`, baggage: `observe.session=${id}` };
+}
+function localAmbient() {
+  for (let i = open.length - 1; i >= 0; i--) if (!open[i].kind.concurrent) return open[i].id;
+  return void 0;
+}
+function currentSessionHeaders() {
+  const id = currentHub().ambient();
+  return id === void 0 ? {} : sessionHeaders(id);
+}
+var Handle = class {
+  constructor(id, kind, opened) {
+    this.id = id;
+    this.kind = kind;
+    this.opened = opened;
+    this.ended = !opened;
+    if (opened) open.push(this);
+  }
+  ended;
+  screen(name) {
+    this.post({ op: "screen", id: this.id, name });
+  }
+  action(name, options) {
+    this.post({ op: "action", id: this.id, name, variant: options?.variant, value: options?.value });
+  }
+  complete(reason, options) {
+    this.end("completed", reason, options);
+  }
+  leave(reason, options) {
+    this.end("left", reason, options);
+  }
+  headers() {
+    return this.opened ? sessionHeaders(this.id) : {};
+  }
+  close() {
+    this.ended = true;
+    const at = open.indexOf(this);
+    if (at >= 0) open.splice(at, 1);
+  }
+  end(result2, reason, options) {
+    if (this.post({ op: "end", id: this.id, result: result2, reason, value: options?.value, currency: options?.currency })) this.close();
+  }
+  post(raw) {
+    if (this.ended) return false;
+    const message = parseSessionMessage(Object.fromEntries(Object.entries(raw).filter(([, value]) => value !== void 0)));
+    if (!message) {
+      warnOnce(`Observe ignored ${this.kind.type}.${String(raw.op)}: names, variants and reasons must match ^[a-z0-9_]{1,64}$, and a value must be a finite number (${JSON.stringify(raw)})`);
+      return false;
+    }
+    try {
+      currentHub().session(message);
+    } catch {
+    }
+    return true;
+  }
+};
+function defineSession(definition) {
+  const type = parseSessionType(definition.type);
+  const steps = parseSteps(definition.steps);
+  const abandonAfterMs = parseAbandonAfterMs(definition.abandonAfterMs);
+  const kind = { type: definition.type, concurrent: definition.concurrent === true };
+  const valid = type !== null && steps !== null && abandonAfterMs !== null;
+  if (!valid) {
+    warnOnce(
+      `Observe ignores the session type ${JSON.stringify(definition.type)}: the type must match ^[a-z0-9_]{1,32}$, steps must be 1 to 16 unique screen:<name>, action:<name>, end:completed or end:left keys, and abandonAfterMs must be 60000 to 86400000`
+    );
+  }
+  const current = () => {
+    for (let i = open.length - 1; i >= 0; i--) if (open[i].kind === kind) return open[i];
+    return null;
+  };
+  return {
+    start() {
+      const hub = currentHub();
+      const id = uuidv7(hub.clock.wallMs());
+      if (!valid || open.length >= SESSION_LIMITS.open) return new Handle(id, kind, false);
+      let opened = false;
+      try {
+        opened = hub.session({ op: "start", id, type, steps, abandonAfterMs, concurrent: kind.concurrent });
+      } catch {
+      }
+      if (opened && !kind.concurrent) {
+        for (const previous of [...open]) if (!previous.kind.concurrent && previous.kind.type === kind.type) previous.close();
+      }
+      return new Handle(id, kind, opened);
+    },
+    current
+  };
+}
+
 // src/electron/bridge.ts
 var BRIDGE_GLOBAL = "__observe";
 var MAX_MESSAGE_BYTES = 1024 * 1024;
@@ -642,7 +864,7 @@ function spend(budget, bytes) {
   budget.bytes -= bytes;
   if (budget.bytes < 0) fail();
 }
-function record(value) {
+function record2(value) {
   if (typeof value !== "object" || value === null || Array.isArray(value)) fail();
   const proto = Object.getPrototypeOf(value);
   if (proto !== Object.prototype && proto !== null) fail();
@@ -679,19 +901,19 @@ function json(value, depth, budget) {
 }
 function jsonObject(value, depth, budget) {
   const out = {};
-  for (const [key, item] of Object.entries(record(value))) {
+  for (const [key, item] of Object.entries(record2(value))) {
     spend(budget, key.length);
     if (item !== void 0) out[key] = json(item, depth - 1, budget);
   }
   return out;
 }
 function attributeInput(value, budget) {
-  const out = boundAttributes(record(value));
+  const out = boundAttributes(record2(value));
   for (const [key, item] of Object.entries(out)) spend(budget, key.length + (typeof item === "string" ? item.length : 1));
   return out;
 }
 function frame(value, budget) {
-  const raw = record(value);
+  const raw = record2(value);
   const file = optionalText(raw.file, LIMITS.nameBytes, budget);
   const line = optionalInt(raw.line);
   const column = optionalInt(raw.column);
@@ -703,7 +925,7 @@ function frame(value, budget) {
   };
 }
 function exception2(value, budget) {
-  const raw = record(value);
+  const raw = record2(value);
   if (!Array.isArray(raw.frames) || raw.frames.length > LIMITS.frames) fail();
   const code = optionalText(raw.code, LIMITS.nameBytes, budget);
   return {
@@ -715,6 +937,11 @@ function exception2(value, budget) {
 }
 function micros2(value) {
   return int(value);
+}
+function session(value) {
+  if (value === null) return { session: null };
+  const id = parseSessionId(value);
+  return id === null ? {} : { session: id };
 }
 function errorDraft2(raw, budget) {
   if (typeof raw.handled !== "boolean") fail();
@@ -730,6 +957,7 @@ function errorDraft2(raw, budget) {
     mechanism: raw.mechanism,
     exceptions: [first, ...rest],
     ...groupingKey !== void 0 && { grouping_key: groupingKey },
+    ...session(raw.session),
     attributes: attributeInput(raw.attributes, budget),
     context: jsonObject(raw.context, LIMITS.contextDepth, budget)
   };
@@ -752,6 +980,7 @@ function logDraft(raw, budget) {
     ...args !== void 0 && { args },
     ...channel !== void 0 && { channel },
     ...errorId !== void 0 && { error_id: errorId },
+    ...session(raw.session),
     attributes: attributeInput(raw.attributes, budget),
     context: jsonObject(raw.context, LIMITS.contextDepth, budget)
   };
@@ -759,10 +988,14 @@ function logDraft(raw, budget) {
 function parseBridgeMessage(value) {
   const budget = { bytes: MAX_MESSAGE_BYTES };
   try {
-    const message = record(value);
+    const message = record2(value);
     if (message.t === "attributes") return { t: "attributes", attributes: attributeInput(message.attributes, budget) };
+    if (message.t === "session") {
+      const parsed = parseSessionMessage(message.session);
+      return parsed === null ? null : { t: "session", session: parsed };
+    }
     if (message.t !== "draft") return null;
-    const draft = record(message.draft);
+    const draft = record2(message.draft);
     if (draft.kind === "error") return { t: "draft", draft: errorDraft2(draft, budget) };
     if (draft.kind === "log") return { t: "draft", draft: logDraft(draft, budget) };
     return null;
@@ -803,14 +1036,24 @@ function captureConsole(target, sink, levels = DEFAULT_CONSOLE_LEVELS) {
 
 // src/electron/renderer.ts
 var warn = console.warn.bind(console);
-var env2 = { clock: systemClock };
 var RemoteHub = class {
   constructor(bridge) {
     this.bridge = bridge;
   }
   state = { kind: "waiting", held: [] };
+  clockOffsetMs = 0;
+  clock = offsetClock(systemClock, () => this.clockOffsetMs);
   submit(draft) {
     return this.send({ t: "draft", draft });
+  }
+  session(message) {
+    return this.send({ t: "session", session: message });
+  }
+  ambient() {
+    return localAmbient();
+  }
+  setClockOffset(offsetMs) {
+    if (Number.isFinite(offsetMs)) this.clockOffsetMs = offsetMs;
   }
   setAttributes(attributes) {
     this.send({ t: "attributes", attributes });
@@ -821,6 +1064,7 @@ var RemoteHub = class {
   }
   open(hello) {
     if (this.state.kind !== "waiting") return;
+    this.setClockOffset(hello.clockOffsetMs);
     if (!hello.enabled) {
       this.state = { kind: "inert" };
       return;
@@ -866,6 +1110,7 @@ function init() {
     }
     const hub = new RemoteHub(bridge);
     installHub(hub);
+    bridge.onClock?.((offsetMs) => hub.setClockOffset(offsetMs));
     window.addEventListener("error", (event) => {
       if (event.error === void 0 && !event.message) return;
       captureError(event.error ?? event.message, { mechanism: "onerror", handled: false });
@@ -880,7 +1125,7 @@ function init() {
           console,
           (call) => {
             const target = currentHub();
-            submitLog((draft) => target.submit(draft), fromLogCall(call, env2));
+            submitLog((draft) => target.submit(draft), fromLogCall(call, target));
           },
           hello.console
         );

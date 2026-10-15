@@ -21,6 +21,8 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 var main_exports = {};
 __export(main_exports, {
   captureException: () => captureException,
+  currentSessionHeaders: () => currentSessionHeaders,
+  defineSession: () => defineSession,
   flush: () => flush,
   init: () => init,
   log: () => log,
@@ -43,11 +45,12 @@ function format(bytes) {
 }
 var lastMs = -1;
 var counter = 0;
+var MAX_HOLD_MS = 1e3;
 function uuidv7(wallMs) {
   const bytes = new Uint8Array(16);
   globalThis.crypto.getRandomValues(bytes);
   let ms = Math.max(0, Math.floor(wallMs));
-  if (ms <= lastMs) {
+  if (ms <= lastMs && lastMs - ms <= MAX_HOLD_MS) {
     ms = lastMs;
     counter++;
     if (counter > 4095) {
@@ -377,10 +380,10 @@ function urls(value) {
   if (hasLongPath(value)) value = replaceEach(value, PATH, (m) => urlParts(m.text));
   return value;
 }
-function afterClosingBracket(value, open) {
+function afterClosingBracket(value, open3) {
   let depth = 0;
   let quote = null;
-  for (let i = open; i < value.length; ) {
+  for (let i = open3; i < value.length; ) {
     if (quote !== null) {
       i = indexOf(value, quote === '"' ? BACKSLASH_OR_DOUBLE : BACKSLASH_OR_SINGLE, i);
       if (i >= value.length) break;
@@ -515,7 +518,7 @@ var Scrubber = class _Scrubber {
     if (/[=:]/.test(value) || / like /i.test(value)) value = this.pairs(value, depth);
     if (value.includes(":") && value.includes("=")) value = this.colonValuesWithEquals(value);
     if (depth === 0 && (value.includes('\\"') || /\\u00/i.test(value))) {
-      const ascii = value.replace(/\\u00([2-7][0-9a-f])/gi, (_, hex2) => String.fromCharCode(parseInt(hex2, 16)));
+      const ascii = value.replace(/\\u00([2-7][0-9a-f])/gi, (_, hex3) => String.fromCharCode(parseInt(hex3, 16)));
       const flat = ascii.replace(/(?<!\\)\\+(?=["'])/g, "");
       const scrubbedFlat = this.pairs(flat, MAX_TEXT_DEPTH);
       if (scrubbedFlat !== flat) value = scrubbedFlat;
@@ -567,10 +570,10 @@ var Scrubber = class _Scrubber {
     if (opens.length === 0) return value;
     let out = "";
     let copied = 0;
-    for (const open of opens) {
-      if (open < copied) continue;
-      out += value.slice(copied, open) + REPLACEMENT;
-      copied = afterClosingBracket(value, open);
+    for (const open3 of opens) {
+      if (open3 < copied) continue;
+      out += value.slice(copied, open3) + REPLACEMENT;
+      copied = afterClosingBracket(value, open3);
     }
     return out + value.slice(copied);
   }
@@ -721,9 +724,9 @@ function attributeString(value) {
 function readError(value) {
   if (typeof value !== "object" || value === null) return void 0;
   try {
-    const record2 = value;
+    const record3 = value;
     const real = value instanceof Error || Object.prototype.toString.call(value) === "[object Error]";
-    const { message, stack, code: code2, name, errors } = record2;
+    const { message, stack, code: code2, name, errors } = record3;
     if (!real && !(typeof message === "string" && typeof stack === "string")) return void 0;
     const type = errorType(name, real ? constructorName(value) : void 0, stack);
     return {
@@ -731,7 +734,7 @@ function readError(value) {
       message: typeof message === "string" ? message : message === void 0 ? "" : safeString(message),
       ...typeof code2 === "string" || typeof code2 === "number" ? { code: String(code2) } : {},
       ...typeof stack === "string" ? { stack } : {},
-      cause: record2.cause,
+      cause: record3.cause,
       ...Array.isArray(errors) && (type === "AggregateError" || value instanceof AggregateError) ? { errors } : {}
     };
   } catch {
@@ -865,15 +868,15 @@ function fit(data, limit) {
     }
   }
   const ordered = entries.flatMap(([key], index) => kept.has(index) ? [[key, kept.get(index)]] : []);
-  let result;
+  let result2;
   if (list) {
-    result = ordered.map(([, value]) => value);
-    if (dropped > 0) result.push(`[${dropped} truncated]`);
+    result2 = ordered.map(([, value]) => value);
+    if (dropped > 0) result2.push(`[${dropped} truncated]`);
   } else {
-    result = Object.fromEntries(dropped > 0 ? [...ordered, ["observe.truncated", dropped]] : ordered);
+    result2 = Object.fromEntries(dropped > 0 ? [...ordered, ["observe.truncated", dropped]] : ordered);
   }
-  const resultBytes = jsonBytes(result);
-  if (resultBytes <= limit) return [result, resultBytes];
+  const resultBytes = jsonBytes(result2);
+  if (resultBytes <= limit) return [result2, resultBytes];
   const fallback = list ? [`[${entries.length} truncated]`] : { "observe.truncated": entries.length };
   return [fallback, jsonBytes(fallback)];
 }
@@ -970,8 +973,8 @@ function decode(path) {
 }
 
 // src/core/capture.ts
-function errorDraft(error, how, env2) {
-  const wall = env2.clock.wallMs();
+function errorDraft(error, how, env) {
+  const wall = env.clock.wallMs();
   const context = contextOf(how.context);
   const fields = readError(error);
   const exceptions = fields ? chain(error, fields, context) : thrown(error, how.mechanism, context);
@@ -983,6 +986,7 @@ function errorDraft(error, how, env2) {
     mechanism: how.mechanism,
     exceptions,
     ...how.groupingKey === void 0 ? {} : { grouping_key: cutUtf8(how.groupingKey, LIMITS.nameBytes * LIMITS.capture) },
+    ...how.session === void 0 ? {} : { session: how.session },
     attributes: boundAttributes(how.attributes ?? {}),
     context: fitJson(context, LIMITS.contextBytes * LIMITS.capture)
   };
@@ -1036,8 +1040,8 @@ function contextOf(context) {
   return json2 !== null && typeof json2 === "object" && !Array.isArray(json2) ? json2 : { value: json2 };
 }
 var SEVERE = LEVELS.indexOf("error");
-function fromLogCall(call, env2) {
-  const wall = call.wallMs ?? env2.clock.wallMs();
+function fromLogCall(call, env) {
+  const wall = call.wallMs ?? env.clock.wallMs();
   const severe = LEVELS.indexOf(call.level) >= SEVERE;
   const text2 = [];
   const args = [];
@@ -1061,8 +1065,8 @@ function fromLogCall(call, env2) {
   const channel = explicit ?? (firstString === void 0 ? void 0 : channelOf(firstString));
   const linked = error === void 0 ? void 0 : errorDraft(
     error,
-    { mechanism: "log", handled: true, attributes: call.attributes, context: call.context },
-    { clock: { wallMs: () => wall, monoMs: () => env2.clock.monoMs() } }
+    { mechanism: "log", handled: true, attributes: call.attributes, context: call.context, session: call.session },
+    { clock: { wallMs: () => wall, monoMs: () => env.clock.monoMs() } }
   );
   const log2 = {
     kind: "log",
@@ -1073,6 +1077,7 @@ function fromLogCall(call, env2) {
     ...args.length > 0 ? { args: fitJson(args, LIMITS.messageBytes * LIMITS.capture) } : {},
     ...channel === void 0 ? {} : { channel },
     ...linked === void 0 ? {} : { error_id: linked.id },
+    ...call.session === void 0 ? {} : { session: call.session },
     attributes: boundAttributes(call.attributes ?? {}),
     context: fitJson(contextOf(call.context), LIMITS.contextBytes * LIMITS.capture)
   };
@@ -1093,7 +1098,7 @@ function parseSegmentKey(key) {
   if (parts.length !== 3) return null;
   const [batchId, cls, suffix] = parts;
   if (uuidv7Ms(batchId) === null) return null;
-  if (cls !== "errors" && cls !== "logs") return null;
+  if (cls !== "errors" && cls !== "logs" && cls !== "events") return null;
   const state = suffix === "open" ? "open" : suffix === "seg" ? "sealed" : null;
   if (state === null) return null;
   return { name: { batchId, class: cls }, state };
@@ -1129,7 +1134,7 @@ function encodeEnvelope(batch, sentAtUs) {
   return `{"batch_id":"${batch.name.batchId}","sent_at_us":${sentAtUs},"resource":${batch.resourceJson},"${batch.name.class}":[${batch.lines.join(",")}]}`;
 }
 var JOURNAL_POLICY = {
-  sealAfterMs: { errors: 1e3, logs: 3e4 },
+  sealAfterMs: { errors: 1e3, logs: 3e4, events: 3e4 },
   maxItems: 500,
   maxSegmentBytes: 512 * 1024,
   syncEveryMs: 5e3,
@@ -1138,8 +1143,8 @@ var JOURNAL_POLICY = {
   capBytes: 50 * 1024 * 1024,
   capFiles: 2e3
 };
-var EVICTION_ORDER = ["logs", "errors"];
-var SEND_ORDER = { errors: 0, logs: 1 };
+var EVICTION_ORDER = ["logs", "events", "errors"];
+var SEND_ORDER = { errors: 0, events: 1, logs: 2 };
 function noDrops() {
   return { evicted: 0, expired: 0, corrupt: 0, failed: 0 };
 }
@@ -1172,13 +1177,14 @@ var Journal = class {
     } catch {
       this.drops.failed++;
       if (segment) void this.seal(cls);
-      return;
+      return false;
     }
     segment.items++;
     segment.bytes += bytes;
     segment.dirty = true;
     if (cls === "errors") this.scheduleSync(segment);
     if (segment.items >= this.policy.maxItems || segment.bytes >= this.policy.maxSegmentBytes) void this.seal(cls);
+    return true;
   }
   tick() {
     const now = this.clock.monoMs();
@@ -1224,8 +1230,8 @@ var Journal = class {
   async load(segment) {
     const text2 = await this.store.read(segment.key);
     if (text2 === null) return null;
-    const result = readBatch(segment.name, text2);
-    switch (result.kind) {
+    const result2 = readBatch(segment.name, text2);
+    switch (result2.kind) {
       case "future":
         this.future.add(segment.key);
         return null;
@@ -1234,8 +1240,8 @@ var Journal = class {
         this.drops.corrupt++;
         return null;
       case "batch":
-        if (result.batch.skipped > 0) this.torn.set(segment.name.batchId, result.batch.skipped);
-        if (result.batch.lines.length > 0) return result.batch;
+        if (result2.batch.skipped > 0) this.torn.set(segment.name.batchId, result2.batch.skipped);
+        if (result2.batch.lines.length > 0) return result2.batch;
         await this.remove(segment);
         return null;
     }
@@ -1281,9 +1287,14 @@ var Journal = class {
       segment.dirty = true;
     }
   }
+  // With no open segment, an append may just have sealed one, so wait for the seals still running for the class.
   seal(cls) {
     const segment = this.open.get(cls);
-    if (!segment) return Promise.resolve();
+    if (!segment) {
+      const running = [...this.sealing].filter(([sealing]) => sealing.name.class === cls).map(([, done2]) => done2);
+      return Promise.all(running).then(() => {
+      });
+    }
     this.open.delete(cls);
     const done = this.finishSeal(segment).finally(() => {
       this.sealing.delete(segment);
@@ -1444,13 +1455,15 @@ function nextHealth(health, outcome, nowMs, jitter, policy) {
   }
 }
 var Delivery = class {
-  constructor(journal, transport, connectivity, policy, clock, random) {
+  constructor(journal, transport, connectivity, policy, clock, random, serverTime = () => {
+  }) {
     this.journal = journal;
     this.transport = transport;
     this.connectivity = connectivity;
     this.policy = policy;
     this.clock = clock;
     this.random = random;
+    this.serverTime = serverTime;
   }
   health = { kind: "healthy" };
   running = null;
@@ -1560,17 +1573,193 @@ var Delivery = class {
   }
   async post(batch) {
     const json2 = encodeEnvelope(batch, micros(this.clock.wallMs()));
+    let reply;
     try {
-      return classify(await this.transport.post(json2, this.policy.timeoutMs));
+      reply = await this.transport.post(json2, this.policy.timeoutMs);
     } catch {
       return classify("network-error");
     }
+    const outcome = classify(reply);
+    if (outcome.kind === "accepted" && reply.dateMs !== void 0) this.serverTime(reply.dateMs);
+    return outcome;
   }
   // Spacing runs from the end of any pause and starts at twice the first health backoff, so the next probe picks another segment.
   space(segment) {
     const attempts = (this.spacing.get(segment.key)?.attempts ?? 0) + 1;
     const fromMs = this.health.kind === "paused" ? this.health.untilMs : this.clock.monoMs();
     this.spacing.set(segment.key, { attempts, untilMs: fromMs + backoffMs(attempts, this.policy) });
+  }
+};
+
+// src/core/sessions.ts
+var SESSION_LIMITS = {
+  open: 64,
+  events: 2e3,
+  steps: 16,
+  typeBytes: 32,
+  minAbandonMs: 6e4,
+  maxAbandonMs: 24 * 36e5,
+  defaultAbandonMs: 10 * 6e4,
+  maxOffsetMs: 4294967295
+};
+var TOKEN = /^[a-z0-9_]{1,64}$/;
+var UUIDV7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+var CURRENCY = /^[A-Z]{3}$/;
+function parseToken(raw) {
+  return typeof raw === "string" && TOKEN.test(raw) ? raw : null;
+}
+function parseSessionType(raw) {
+  const token = parseToken(raw);
+  return token !== null && token.length <= SESSION_LIMITS.typeBytes ? token : null;
+}
+function parseSessionId(raw) {
+  return typeof raw === "string" && UUIDV7.test(raw) ? raw : null;
+}
+function parseStepKey(raw) {
+  if (typeof raw !== "string") return null;
+  if (raw === "end:completed" || raw === "end:left") return raw;
+  const [kind, name, ...rest] = raw.split(":");
+  return rest.length === 0 && (kind === "screen" || kind === "action") && parseToken(name) !== null ? raw : null;
+}
+function parseSteps(raw) {
+  if (!Array.isArray(raw) || raw.length < 1 || raw.length > SESSION_LIMITS.steps) return null;
+  const steps = raw.map(parseStepKey);
+  if (steps.some((step) => step === null) || new Set(steps).size !== steps.length) return null;
+  return steps;
+}
+function parseAbandonAfterMs(raw) {
+  if (raw === void 0) return SESSION_LIMITS.defaultAbandonMs;
+  return typeof raw === "number" && Number.isInteger(raw) && raw >= SESSION_LIMITS.minAbandonMs && raw <= SESSION_LIMITS.maxAbandonMs ? raw : null;
+}
+function record(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? value : null;
+}
+function optional(raw, parse) {
+  return raw === void 0 ? void 0 : parse(raw);
+}
+var finite = (raw) => typeof raw === "number" && Number.isFinite(raw) ? raw : null;
+var money = (raw) => typeof raw === "number" && Number.isFinite(raw) && raw >= 0 ? raw : null;
+var currency = (raw) => typeof raw === "string" && CURRENCY.test(raw) ? raw : null;
+var result = (raw) => raw === "completed" || raw === "left" ? raw : null;
+function parseSessionMessage(value) {
+  const raw = record(value);
+  const id = parseSessionId(raw?.id);
+  if (raw === null || id === null) return null;
+  switch (raw.op) {
+    case "start": {
+      const type = parseSessionType(raw.type);
+      const steps = parseSteps(raw.steps);
+      const abandonAfterMs = parseAbandonAfterMs(raw.abandonAfterMs);
+      if (type === null || steps === null || abandonAfterMs === null || typeof raw.concurrent !== "boolean") return null;
+      return { op: "start", id, type, steps, abandonAfterMs, concurrent: raw.concurrent };
+    }
+    case "screen": {
+      const name = parseToken(raw.name);
+      return name === null ? null : { op: "screen", id, name };
+    }
+    case "action": {
+      const name = parseToken(raw.name);
+      const variant = optional(raw.variant, parseToken);
+      const value2 = optional(raw.value, finite);
+      if (name === null || variant === null || value2 === null) return null;
+      return { op: "action", id, name, ...variant !== void 0 && { variant }, ...value2 !== void 0 && { value: value2 } };
+    }
+    case "end": {
+      const ending = result(raw.result);
+      const reason = optional(raw.reason, parseToken);
+      const value2 = optional(raw.value, money);
+      const code2 = optional(raw.currency, currency);
+      if (ending === null || reason === null || value2 === null || code2 === null) return null;
+      if (ending === "left" && reason === void 0 || code2 !== void 0 && value2 === void 0) return null;
+      return {
+        op: "end",
+        id,
+        result: ending,
+        ...reason !== void 0 && { reason },
+        ...value2 !== void 0 && { value: value2 },
+        ...code2 !== void 0 && { currency: code2 }
+      };
+    }
+    default:
+      return null;
+  }
+}
+function parseMarker(value) {
+  const raw = record(value);
+  const id = parseSessionId(raw?.id);
+  const type = parseSessionType(raw?.type);
+  const attributes2 = record(raw?.attributes);
+  if (id === null || type === null || attributes2 === null) return null;
+  if (!Object.values(attributes2).every((item) => typeof item === "string")) return null;
+  return { id, type, attributes: attributes2 };
+}
+function interruptedItem(marker) {
+  return { kind: "interrupted", session_id: marker.id, session_type: marker.type };
+}
+var INTERRUPTED = "interrupted";
+var SUPERSEDED = "superseded";
+var SessionRegistry = class {
+  open = /* @__PURE__ */ new Map();
+  apply(owner, message, nowMono) {
+    if (message.op === "start") return this.start(owner, message, nowMono);
+    const session3 = this.open.get(message.id);
+    if (!session3 || session3.owner !== owner) return [];
+    if (message.op !== "end" && session3.nextSeq >= SESSION_LIMITS.events - 1) return [];
+    switch (message.op) {
+      case "screen":
+        session3.screen = message.name;
+        return [{ kind: "screen", ...this.at(session3, nowMono), name: message.name }];
+      case "action": {
+        const { name, variant, value } = message;
+        return [{ kind: "action", ...this.at(session3, nowMono), name, ...variant !== void 0 && { variant }, ...value !== void 0 && { value } }];
+      }
+      case "end": {
+        const { result: result2, reason, value, currency: currency2 } = message;
+        return [this.end(session3, nowMono, result2, reason, value, currency2)];
+      }
+    }
+  }
+  interrupt(owner, nowMono) {
+    return [...this.open.values()].filter((session3) => session3.owner === owner).map((session3) => this.end(session3, nowMono, "left", INTERRUPTED));
+  }
+  attach(owner) {
+    let found;
+    for (const session3 of this.open.values()) {
+      if (!session3.concurrent && (owner === "main" || session3.owner === owner)) found = session3.id;
+    }
+    return found;
+  }
+  start(owner, message, nowMono) {
+    if (this.open.has(message.id)) return [];
+    const superseded = message.concurrent ? [] : [...this.open.values()].filter((session4) => !session4.concurrent && session4.type === message.type && session4.owner === owner);
+    if (this.open.size - superseded.length >= SESSION_LIMITS.open) return [];
+    const items = superseded.map((session4) => this.end(session4, nowMono, "left", SUPERSEDED));
+    const session3 = { id: message.id, type: message.type, concurrent: message.concurrent, owner, startedMono: nowMono, nextSeq: 0, screen: void 0 };
+    this.open.set(message.id, session3);
+    items.push({ kind: "start", ...this.at(session3, nowMono), steps: message.steps, abandon_after_ms: message.abandonAfterMs });
+    return items;
+  }
+  end(session3, nowMono, result2, reason, value, currency2) {
+    this.open.delete(session3.id);
+    return {
+      kind: "end",
+      ...this.at(session3, nowMono),
+      result: result2,
+      ...reason !== void 0 && { reason },
+      ...value !== void 0 && { value },
+      ...currency2 !== void 0 && { currency: currency2 }
+    };
+  }
+  at(session3, nowMono) {
+    const seq = session3.nextSeq++;
+    const offset = Math.min(SESSION_LIMITS.maxOffsetMs, Math.max(0, Math.round(nowMono - session3.startedMono)));
+    return {
+      session_id: session3.id,
+      session_type: session3.type,
+      seq,
+      offset_ms: offset,
+      ...session3.screen !== void 0 && { screen: session3.screen }
+    };
   }
 };
 
@@ -1587,9 +1776,14 @@ function registry() {
   return current;
 }
 var preInitHub = {
+  clock: systemClock,
   submit(draft) {
     return defer((hub) => hub.submit(draft));
   },
+  session(message) {
+    return defer((hub) => hub.session(message));
+  },
+  ambient: () => void 0,
   setAttributes(attributes2) {
     defer((hub) => hub.setAttributes(attributes2));
   },
@@ -1604,7 +1798,10 @@ function defer(call) {
   return true;
 }
 var disabledHub = {
+  clock: systemClock,
   submit: () => false,
+  session: () => false,
+  ambient: () => void 0,
   setAttributes: () => {
   },
   flush: () => Promise.resolve(false)
@@ -1624,14 +1821,17 @@ function installHub(hub) {
 function currentHub() {
   return registry().hub ?? preInitHub;
 }
-var env = { clock: systemClock };
 function captureError(error, how, hub = currentHub()) {
   try {
-    const draft = errorDraft(error, how, env);
+    const draft = errorDraft(error, how, hub);
     return hub.submit(draft) ? draft.id : void 0;
   } catch {
     return void 0;
   }
+}
+function sessionOf(ref) {
+  if (ref === null) return null;
+  return parseSessionId(ref?.id) ?? void 0;
 }
 function captureException(error, options) {
   return captureError(error, {
@@ -1639,7 +1839,8 @@ function captureException(error, options) {
     handled: options?.handled ?? true,
     attributes: options?.attributes,
     context: options?.context,
-    groupingKey: options?.groupingKey
+    groupingKey: options?.groupingKey,
+    session: sessionOf(options?.session)
   });
 }
 function submitLog(submit, [log2, linked]) {
@@ -1653,7 +1854,10 @@ function submitLog(submit, [log2, linked]) {
 function log(level, message, options) {
   try {
     const hub = currentHub();
-    submitLog((draft) => hub.submit(draft), fromLogCall({ level, args: [message], channel: options?.channel, attributes: options?.attributes, context: options?.context }, env));
+    submitLog(
+      (draft) => hub.submit(draft),
+      fromLogCall({ level, args: [message], channel: options?.channel, attributes: options?.attributes, context: options?.context, session: sessionOf(options?.session) }, hub)
+    );
   } catch {
   }
 }
@@ -1674,6 +1878,7 @@ function flush(options) {
 // src/core/prepare.ts
 function prepare(process2, draft, ctx) {
   const shared = {
+    ...ctx.session === void 0 ? {} : { session_id: ctx.session },
     attributes: mergedAttributes(process2, draft, ctx),
     context: boundContext(asObject(ctx.scrubber.keyed(draft.context)))
   };
@@ -1738,6 +1943,7 @@ function asObject(value) {
 var CLIENT_POLICY = {
   errors: { burst: 20, perSecond: 1 },
   logs: { burst: 500, perSecond: 50 },
+  events: { burst: 200, perSecond: 20 },
   duplicateWindowMs: 2e3,
   maintainEveryMs: 3e4,
   orphanAfterMs: 3e4,
@@ -1766,11 +1972,15 @@ var Client = class {
   lastMaintainMs;
   lastWarnMs = -Infinity;
   env;
-  record(process2, draft) {
+  sessions = new SessionRegistry();
+  get clock() {
+    return this.deps.clock;
+  }
+  record(process2, draft, owner = "main") {
     try {
       const admitted = this.guard(process2, draft);
       if (!admitted) return false;
-      this.write(process2, admitted);
+      this.write(process2, admitted, owner);
       return true;
     } catch (error) {
       this.warn("Observe could not record an item", error);
@@ -1780,18 +1990,55 @@ var Client = class {
   submit(draft) {
     return this.record("main", draft);
   }
-  captureError(process2, error, how) {
+  session(message) {
+    return this.sessionMessage("main", "main", message);
+  }
+  sessionMessage(process2, owner, message) {
+    try {
+      const metered = message.op === "screen" || message.op === "action";
+      if (metered && !this.take(`${process2}/events`, this.policy.events, this.deps.clock.monoMs())) return false;
+      const items = this.sessions.apply(owner, message, this.deps.clock.monoMs());
+      this.writeEvents(items);
+      return items.length > 0;
+    } catch (error) {
+      this.warn("Observe could not record a session event", error);
+      return false;
+    }
+  }
+  interrupt(owner) {
+    try {
+      this.writeEvents(this.sessions.interrupt(owner, this.deps.clock.monoMs()));
+    } catch (error) {
+      this.warn("Observe could not end the sessions of a window", error);
+    }
+  }
+  ambient() {
+    return this.sessions.attach("main");
+  }
+  // Each marker outlives its interrupted item until that item is sealed, so a crash in between sends it again rather than never.
+  async recover() {
+    try {
+      const markers = this.deps.markers.list();
+      if (markers.length === 0) return;
+      for (const marker of markers) this.deps.journal.append("events", JSON.stringify({ ...interruptedItem(marker), attributes: marker.attributes }));
+      await this.deps.journal.seal("events");
+      for (const marker of markers) this.deps.markers.remove(marker.id);
+    } catch (error) {
+      this.warn("Observe could not recover the sessions of the last launch", error);
+    }
+  }
+  captureError(process2, error, how, owner = "main") {
     try {
       const draft = errorDraft(error, how, this.env);
-      return this.record(process2, draft) ? draft.id : void 0;
+      return this.record(process2, draft, owner) ? draft.id : void 0;
     } catch (error2) {
       this.warn("Observe could not capture an error", error2);
       return void 0;
     }
   }
-  logCall(process2, call) {
+  logCall(process2, call, owner = "main") {
     try {
-      submitLog((draft) => this.record(process2, draft), fromLogCall(call, this.env));
+      submitLog((draft) => this.record(process2, draft, owner), fromLogCall(call, this.env));
     } catch (error) {
       this.warn("Observe could not record a log", error);
     }
@@ -1851,19 +2098,31 @@ var Client = class {
     }
     return attributes(Object.fromEntries(this.scopeInput), this.deps.scrubber);
   }
-  write(process2, draft) {
-    const line = this.prepareLine(process2, draft, { scope: this.scope, scrubber: this.deps.scrubber, roots: this.deps.roots });
+  write(process2, draft, owner = "main") {
+    const session3 = draft.session === void 0 ? this.sessions.attach(owner) : draft.session ?? void 0;
+    const line = this.prepareLine(process2, draft, { scope: this.scope, scrubber: this.deps.scrubber, roots: this.deps.roots, ...session3 !== void 0 && { session: session3 } });
     this.deps.journal.append(draft.kind === "error" ? "errors" : "logs", line);
   }
-  guard(process2, draft) {
-    const now = this.deps.clock.monoMs();
-    const signature = draft.kind === "error" ? errorSignature(draft) : null;
-    if (signature !== null) {
-      const seen = this.recent.get(signature);
-      if (seen !== void 0 && now - seen < this.policy.duplicateWindowMs) return null;
+  writeEvents(items) {
+    const ended = [];
+    for (const item of items) {
+      if (item.kind === "start") this.mark(item.session_id, item.session_type);
+      const written = this.deps.journal.append("events", JSON.stringify({ ...item, attributes: this.scope }));
+      if (item.kind === "end" && written) ended.push(item.session_id);
     }
-    const key = `${process2}/${draft.kind === "error" && !draft.handled ? "crash" : draft.kind}`;
-    const bucket = draft.kind === "error" ? this.policy.errors : this.policy.logs;
+    if (ended.length === 0) return;
+    void this.deps.journal.seal("events").then(() => {
+      for (const id of ended) this.deps.markers.remove(id);
+    }).catch((error) => this.warn("Observe could not clear an ended session", error));
+  }
+  mark(id, type) {
+    try {
+      this.deps.markers.write({ id, type, attributes: this.scope });
+    } catch (error) {
+      this.warn("Observe could not mark an open session", error);
+    }
+  }
+  take(key, bucket, now) {
     let state = this.buckets.get(key);
     if (!state) {
       state = { tokens: bucket.burst, atMs: now, suppressed: 0 };
@@ -1876,6 +2135,18 @@ var Client = class {
       return null;
     }
     state.tokens--;
+    return state;
+  }
+  guard(process2, draft) {
+    const now = this.deps.clock.monoMs();
+    const signature = draft.kind === "error" ? errorSignature(draft) : null;
+    if (signature !== null) {
+      const seen = this.recent.get(signature);
+      if (seen !== void 0 && now - seen < this.policy.duplicateWindowMs) return null;
+    }
+    const key = `${process2}/${draft.kind === "error" && !draft.handled ? "crash" : draft.kind}`;
+    const state = this.take(key, draft.kind === "error" ? this.policy.errors : this.policy.logs, now);
+    if (!state) return null;
     if (signature !== null) this.remember(signature, now);
     if (state.suppressed === 0) return draft;
     const suppressed = state.suppressed;
@@ -1908,6 +2179,7 @@ var Client = class {
       time_us: micros(wallMs),
       level: "warning",
       message: "Observe dropped queued data",
+      session: null,
       attributes: Object.fromEntries(DROP_KINDS.map((kind) => [`observe.dropped.${kind}`, String(this.drops[kind])])),
       context: {}
     });
@@ -1929,6 +2201,52 @@ function errorSignature(draft) {
   const where = frame2 ? [frame2.function, frame2.file ?? "", frame2.line ?? 0, frame2.column ?? 0] : [draft.context.url ?? null, draft.context.name ?? null];
   return JSON.stringify([draft.handled, draft.mechanism, outer.type, outer.message, ...where]);
 }
+
+// src/core/clock.ts
+var CLOCK_POLICY = {
+  samples: 5,
+  minOffsetMs: 2e3,
+  dateResolutionMs: 1e3
+};
+var CorrectedClock = class {
+  constructor(base, store, changed = () => {
+  }) {
+    this.base = base;
+    this.store = store;
+    this.changed = changed;
+    this.offset = store.read() ?? 0;
+  }
+  offset;
+  samples = [];
+  wallMs() {
+    return this.base.wallMs() + this.offset;
+  }
+  monoMs() {
+    return this.base.monoMs();
+  }
+  offsetMs() {
+    return this.offset;
+  }
+  // An HTTP Date is truncated to the second, so the server's time is on average half a second past it.
+  observe(serverDateMs) {
+    if (!Number.isFinite(serverDateMs)) return;
+    this.samples.push(serverDateMs + CLOCK_POLICY.dateResolutionMs / 2 - this.base.wallMs());
+    if (this.samples.length > CLOCK_POLICY.samples) this.samples.shift();
+    const sorted = [...this.samples].sort((a, b) => a - b);
+    const median = sorted[Math.floor(sorted.length / 2)];
+    const next = Math.abs(median) > CLOCK_POLICY.minOffsetMs ? Math.round(median) : 0;
+    if (next === this.offset) return;
+    this.offset = next;
+    try {
+      this.store.write(next);
+    } catch {
+    }
+    try {
+      this.changed(next);
+    } catch {
+    }
+  }
+};
 
 // src/node/fs-store.ts
 var import_node_fs = require("node:fs");
@@ -2042,32 +2360,115 @@ var FsSegmentStore = class {
   }
 };
 var UUID2 = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-function readOrCreateInstallId(dir) {
-  const path = (0, import_node_path.join)(dir, "install-id");
-  try {
-    const existing = (0, import_node_fs.readFileSync)(path, "utf8").trim();
-    if (UUID2.test(existing)) return existing;
-  } catch {
-  }
-  const id = uuidv4();
+function replaceFile(dir, name, text2) {
   (0, import_node_fs.mkdirSync)(dir, { recursive: true });
+  const path = (0, import_node_path.join)(dir, name);
   const temp = `${path}.${uuidv4()}.tmp`;
   const fd = (0, import_node_fs.openSync)(temp, "w");
   try {
-    writeAll(fd, id);
+    writeAll(fd, text2);
     (0, import_node_fs.fsyncSync)(fd);
   } finally {
     (0, import_node_fs.closeSync)(fd);
   }
   (0, import_node_fs.renameSync)(temp, path);
+}
+function removeFile(path) {
+  try {
+    (0, import_node_fs.unlinkSync)(path);
+  } catch (error) {
+    if (code(error) !== "ENOENT") throw error;
+  }
+}
+function readOrCreateInstallId(dir) {
+  try {
+    const existing = (0, import_node_fs.readFileSync)((0, import_node_path.join)(dir, "install-id"), "utf8").trim();
+    if (UUID2.test(existing)) return existing;
+  } catch {
+  }
+  const id = uuidv4();
+  replaceFile(dir, "install-id", id);
   return id;
 }
+function processAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return code(error) === "EPERM";
+  }
+}
+var FsMarkerStore = class {
+  constructor(dir, owner) {
+    this.dir = dir;
+    this.owner = { pid: process.pid, alive: processAlive, ...owner };
+  }
+  owner;
+  // The marker only has to reach the disk before the start's own line does, and the journal fsyncs events every 5 s, so main does not wait for this fsync.
+  write(marker) {
+    (0, import_node_fs.mkdirSync)(this.dir, { recursive: true });
+    const path = (0, import_node_path.join)(this.dir, `${marker.id}.json`);
+    const temp = `${path}.${uuidv4()}.tmp`;
+    (0, import_node_fs.writeFileSync)(temp, JSON.stringify({ ...marker, pid: this.owner.pid, launch: this.owner.launch }));
+    (0, import_node_fs.renameSync)(temp, path);
+    void (0, import_promises.open)(path, "r").then((file) => file.sync().finally(() => file.close())).catch(() => {
+    });
+  }
+  remove(id) {
+    removeFile((0, import_node_path.join)(this.dir, `${id}.json`));
+  }
+  list() {
+    let names;
+    try {
+      names = (0, import_node_fs.readdirSync)(this.dir);
+    } catch (error) {
+      if (code(error) === "ENOENT") return [];
+      throw error;
+    }
+    const markers = [];
+    for (const name of names) {
+      const path = (0, import_node_path.join)(this.dir, name);
+      const id = name.endsWith(".json") ? parseSessionId(name.slice(0, -".json".length)) : null;
+      let raw;
+      try {
+        raw = id === null ? null : JSON.parse((0, import_node_fs.readFileSync)(path, "utf8"));
+      } catch {
+      }
+      const marker = parseMarker(raw);
+      if (marker === null || marker.id !== id) removeFile(path);
+      else if (!liveOwner(this.owner, raw)) markers.push(marker);
+    }
+    return markers;
+  }
+};
+function liveOwner(owner, writer) {
+  if (writer.launch === owner.launch) return true;
+  return typeof writer.pid === "number" && writer.pid !== owner.pid && owner.alive(writer.pid);
+}
+var FsOffsetStore = class {
+  constructor(dir) {
+    this.dir = dir;
+  }
+  read() {
+    try {
+      const value = JSON.parse((0, import_node_fs.readFileSync)((0, import_node_path.join)(this.dir, "clock.json"), "utf8"));
+      const offset = value?.offset_ms;
+      return typeof offset === "number" && Number.isSafeInteger(offset) ? offset : null;
+    } catch {
+      return null;
+    }
+  }
+  write(offsetMs) {
+    replaceFile(this.dir, "clock.json", JSON.stringify({ offset_ms: offsetMs }));
+  }
+};
 
 // src/electron/bridge.ts
 var CHANNEL = {
   post: "observe:v1:post",
   hello: "observe:v1:hello",
-  flush: "observe:v1:flush"
+  flush: "observe:v1:flush",
+  clock: "observe:v1:clock"
 };
 var MAX_MESSAGE_BYTES = 1024 * 1024;
 var MAX_FLUSH_TIMEOUT_MS = 6e4;
@@ -2081,7 +2482,7 @@ function spend(budget, bytes) {
   budget.bytes -= bytes;
   if (budget.bytes < 0) fail();
 }
-function record(value) {
+function record2(value) {
   if (typeof value !== "object" || value === null || Array.isArray(value)) fail();
   const proto = Object.getPrototypeOf(value);
   if (proto !== Object.prototype && proto !== null) fail();
@@ -2118,19 +2519,19 @@ function json(value, depth, budget) {
 }
 function jsonObject(value, depth, budget) {
   const out = {};
-  for (const [key, item] of Object.entries(record(value))) {
+  for (const [key, item] of Object.entries(record2(value))) {
     spend(budget, key.length);
     if (item !== void 0) out[key] = json(item, depth - 1, budget);
   }
   return out;
 }
 function attributeInput(value, budget) {
-  const out = boundAttributes(record(value));
+  const out = boundAttributes(record2(value));
   for (const [key, item] of Object.entries(out)) spend(budget, key.length + (typeof item === "string" ? item.length : 1));
   return out;
 }
 function frame(value, budget) {
-  const raw = record(value);
+  const raw = record2(value);
   const file = optionalText(raw.file, LIMITS.nameBytes, budget);
   const line = optionalInt(raw.line);
   const column = optionalInt(raw.column);
@@ -2142,7 +2543,7 @@ function frame(value, budget) {
   };
 }
 function exception2(value, budget) {
-  const raw = record(value);
+  const raw = record2(value);
   if (!Array.isArray(raw.frames) || raw.frames.length > LIMITS.frames) fail();
   const code2 = optionalText(raw.code, LIMITS.nameBytes, budget);
   return {
@@ -2154,6 +2555,11 @@ function exception2(value, budget) {
 }
 function micros2(value) {
   return int(value);
+}
+function session(value) {
+  if (value === null) return { session: null };
+  const id = parseSessionId(value);
+  return id === null ? {} : { session: id };
 }
 function errorDraft2(raw, budget) {
   if (typeof raw.handled !== "boolean") fail();
@@ -2169,6 +2575,7 @@ function errorDraft2(raw, budget) {
     mechanism: raw.mechanism,
     exceptions: [first, ...rest],
     ...groupingKey !== void 0 && { grouping_key: groupingKey },
+    ...session(raw.session),
     attributes: attributeInput(raw.attributes, budget),
     context: jsonObject(raw.context, LIMITS.contextDepth, budget)
   };
@@ -2191,6 +2598,7 @@ function logDraft(raw, budget) {
     ...args !== void 0 && { args },
     ...channel !== void 0 && { channel },
     ...errorId !== void 0 && { error_id: errorId },
+    ...session(raw.session),
     attributes: attributeInput(raw.attributes, budget),
     context: jsonObject(raw.context, LIMITS.contextDepth, budget)
   };
@@ -2198,10 +2606,14 @@ function logDraft(raw, budget) {
 function parseBridgeMessage(value) {
   const budget = { bytes: MAX_MESSAGE_BYTES };
   try {
-    const message = record(value);
+    const message = record2(value);
     if (message.t === "attributes") return { t: "attributes", attributes: attributeInput(message.attributes, budget) };
+    if (message.t === "session") {
+      const parsed = parseSessionMessage(message.session);
+      return parsed === null ? null : { t: "session", session: parsed };
+    }
     if (message.t !== "draft") return null;
-    const draft = record(message.draft);
+    const draft = record2(message.draft);
     if (draft.kind === "error") return { t: "draft", draft: errorDraft2(draft, budget) };
     if (draft.kind === "log") return { t: "draft", draft: logDraft(draft, budget) };
     return null;
@@ -2254,13 +2666,15 @@ function goneDraft(type, message, exitCode, context) {
 }
 function installAppHandlers(client, app2) {
   app2.on("render-process-gone", (_event, contents, details) => {
-    if (details.reason === "clean-exit") return;
-    let url = "";
-    try {
-      url = contents.getURL();
-    } catch {
+    if (details.reason !== "clean-exit") {
+      let url = "";
+      try {
+        url = contents.getURL();
+      } catch {
+      }
+      client.record("renderer", goneDraft("RenderProcessGone", details.reason, details.exitCode, { url }), contents.id);
     }
-    client.record("renderer", goneDraft("RenderProcessGone", details.reason, details.exitCode, { url }));
+    client.interrupt(contents.id);
   });
   app2.on("child-process-gone", (_event, details) => {
     if (details.reason === "clean-exit") return;
@@ -2370,11 +2784,115 @@ function sessionTransport(endpoint, key, fetcher) {
         });
         await response.arrayBuffer().catch(() => void 0);
         const retryAfterSeconds = parseRetryAfter(response.headers.get("retry-after"), Date.now());
-        return retryAfterSeconds === void 0 ? { status: response.status } : { status: response.status, retryAfterSeconds };
+        const dateMs = Date.parse(response.headers.get("date") ?? "");
+        return {
+          status: response.status,
+          ...retryAfterSeconds !== void 0 && { retryAfterSeconds },
+          ...!Number.isNaN(dateMs) && { dateMs }
+        };
       } catch {
         return { status: 0 };
       }
     }
+  };
+}
+
+// src/core/define-session.ts
+var open2 = [];
+var warned = /* @__PURE__ */ new Set();
+function warnOnce(message) {
+  if (warned.has(message) || warned.size >= 100) return;
+  warned.add(message);
+  try {
+    console.warn(message);
+  } catch {
+  }
+}
+var hex2 = (bytes) => Array.from(globalThis.crypto.getRandomValues(new Uint8Array(bytes)), (byte) => byte.toString(16).padStart(2, "0")).join("");
+function sessionHeaders(id) {
+  return { traceparent: `00-${hex2(16)}-${hex2(8)}-00`, baggage: `observe.session=${id}` };
+}
+function currentSessionHeaders() {
+  const id = currentHub().ambient();
+  return id === void 0 ? {} : sessionHeaders(id);
+}
+var Handle = class {
+  constructor(id, kind, opened) {
+    this.id = id;
+    this.kind = kind;
+    this.opened = opened;
+    this.ended = !opened;
+    if (opened) open2.push(this);
+  }
+  ended;
+  screen(name) {
+    this.post({ op: "screen", id: this.id, name });
+  }
+  action(name, options) {
+    this.post({ op: "action", id: this.id, name, variant: options?.variant, value: options?.value });
+  }
+  complete(reason, options) {
+    this.end("completed", reason, options);
+  }
+  leave(reason, options) {
+    this.end("left", reason, options);
+  }
+  headers() {
+    return this.opened ? sessionHeaders(this.id) : {};
+  }
+  close() {
+    this.ended = true;
+    const at = open2.indexOf(this);
+    if (at >= 0) open2.splice(at, 1);
+  }
+  end(result2, reason, options) {
+    if (this.post({ op: "end", id: this.id, result: result2, reason, value: options?.value, currency: options?.currency })) this.close();
+  }
+  post(raw) {
+    if (this.ended) return false;
+    const message = parseSessionMessage(Object.fromEntries(Object.entries(raw).filter(([, value]) => value !== void 0)));
+    if (!message) {
+      warnOnce(`Observe ignored ${this.kind.type}.${String(raw.op)}: names, variants and reasons must match ^[a-z0-9_]{1,64}$, and a value must be a finite number (${JSON.stringify(raw)})`);
+      return false;
+    }
+    try {
+      currentHub().session(message);
+    } catch {
+    }
+    return true;
+  }
+};
+function defineSession(definition) {
+  const type = parseSessionType(definition.type);
+  const steps = parseSteps(definition.steps);
+  const abandonAfterMs = parseAbandonAfterMs(definition.abandonAfterMs);
+  const kind = { type: definition.type, concurrent: definition.concurrent === true };
+  const valid = type !== null && steps !== null && abandonAfterMs !== null;
+  if (!valid) {
+    warnOnce(
+      `Observe ignores the session type ${JSON.stringify(definition.type)}: the type must match ^[a-z0-9_]{1,32}$, steps must be 1 to 16 unique screen:<name>, action:<name>, end:completed or end:left keys, and abandonAfterMs must be 60000 to 86400000`
+    );
+  }
+  const current = () => {
+    for (let i = open2.length - 1; i >= 0; i--) if (open2[i].kind === kind) return open2[i];
+    return null;
+  };
+  return {
+    start() {
+      const hub = currentHub();
+      const id = uuidv7(hub.clock.wallMs());
+      if (!valid || open2.length >= SESSION_LIMITS.open) return new Handle(id, kind, false);
+      let opened = false;
+      try {
+        opened = hub.session({ op: "start", id, type, steps, abandonAfterMs, concurrent: kind.concurrent });
+      } catch {
+      }
+      if (opened && !kind.concurrent) {
+        for (const previous of [...open2]) if (!previous.kind.concurrent && previous.kind.type === kind.type) previous.close();
+      }
+      return new Handle(id, kind, opened);
+    },
+    current
   };
 }
 
@@ -2401,7 +2919,7 @@ function init(options) {
   }
 }
 function registerDisabledIpc() {
-  const hello = { enabled: false, console: null };
+  const hello = { enabled: false, console: null, clockOffsetMs: 0 };
   import_electron.ipcMain.handle(CHANNEL.hello, () => hello);
   import_electron.ipcMain.handle(CHANNEL.flush, () => false);
 }
@@ -2409,12 +2927,13 @@ function start(options) {
   Error.stackTraceLimit = Math.max(Error.stackTraceLimit, 50);
   const dir = options.dir ?? (0, import_node_path2.join)(import_electron.app.getPath("userData"), "observe");
   const scrubber = Scrubber.withDefaults(options.scrub?.keys ?? []);
+  const launch = uuidv4();
   const resource = {
     platform: "javascript",
     service: options.service,
     release: options.release ?? import_electron.app.getVersion(),
     host: readOrCreateInstallId(dir),
-    sdk: { name: "observe-js", version: "0.1.0" },
+    sdk: { name: "observe-js", version: "0.2.0" },
     runtime: { name: "electron", version: process.versions.electron ?? "" },
     attributes: attributes(
       {
@@ -2423,22 +2942,25 @@ function start(options) {
         "os.arch": (0, import_node_os.arch)(),
         "node.version": process.versions.node,
         "chrome.version": process.versions.chrome,
-        "session.id": uuidv4(),
+        "launch.id": launch,
         "release.channel": options.channel,
         "vcs.revision": options.revision
       },
       scrubber
     )
   };
-  const journal = new Journal(new FsSegmentStore((0, import_node_path2.join)(dir, "queue")), JSON.stringify(resource), JOURNAL_POLICY, systemClock);
+  const clock = new CorrectedClock(systemClock, new FsOffsetStore(dir), shareClockOffset);
+  const journal = new Journal(new FsSegmentStore((0, import_node_path2.join)(dir, "queue")), JSON.stringify(resource), JOURNAL_POLICY, clock);
   let ready = false;
   const transport = sessionTransport(options.endpoint, options.key, () => import_electron.app.whenReady().then(ingestFetch));
-  const delivery = new Delivery(journal, transport, { online: () => ready && import_electron.net.isOnline() }, DELIVERY_POLICY, systemClock, Math.random);
-  const client = new Client({ journal, delivery, scrubber, roots: [import_electron.app.getAppPath()], clock: systemClock, scope: options.attributes ?? {}, warn });
+  const delivery = new Delivery(journal, transport, { online: () => ready && import_electron.net.isOnline() }, DELIVERY_POLICY, clock, Math.random, (dateMs) => clock.observe(dateMs));
+  const markers = new FsMarkerStore((0, import_node_path2.join)(dir, "sessions"), { launch });
+  const client = new Client({ journal, delivery, markers, scrubber, roots: [import_electron.app.getAppPath()], clock, scope: options.attributes ?? {}, warn });
+  void client.recover();
   installHub(client);
   installProcessHandlers(client, process, warn);
   const consoleLevels = options.logs?.from === "console" ? options.logs.levels ?? DEFAULT_CONSOLE_LEVELS : null;
-  registerIpc(client, { enabled: true, console: consoleLevels });
+  registerIpc(client, () => ({ enabled: true, console: consoleLevels, clockOffsetMs: clock.offsetMs() }));
   installAppHandlers(client, import_electron.app);
   if (options.logs?.from === "electron-log") attachElectronLog(client, options.logs.log, options.logs.level);
   if (consoleLevels) captureConsole(console, (call) => client.logCall("main", call), consoleLevels);
@@ -2456,8 +2978,32 @@ function ingestFetch() {
   if (typeof ses.fetch === "function") return ses.fetch.bind(ses);
   return globalThis.fetch;
 }
+function endsOrStarts(value) {
+  const session3 = value?.t === "session" ? value.session : void 0;
+  return session3?.op === "start" || session3?.op === "end";
+}
+var greeted = /* @__PURE__ */ new Set();
+function shareClockOffset(offsetMs) {
+  for (const sender of greeted) {
+    try {
+      sender.send(CHANNEL.clock, offsetMs);
+    } catch {
+    }
+  }
+}
 function registerIpc(client, hello) {
   const windows = /* @__PURE__ */ new Map();
+  const watched = /* @__PURE__ */ new Set();
+  const watch = (sender) => {
+    const id = sender.id;
+    if (watched.has(id)) return;
+    watched.add(id);
+    sender.on("did-navigate", () => client.interrupt(id));
+    sender.once("destroyed", () => {
+      watched.delete(id);
+      client.interrupt(id);
+    });
+  };
   const allow = (sender) => {
     const now = systemClock.monoMs();
     let window = windows.get(sender.id);
@@ -2476,21 +3022,33 @@ function registerIpc(client, hello) {
   };
   import_electron.ipcMain.on(CHANNEL.post, (event, value) => {
     try {
-      if (!allow(event.sender)) return;
+      if (!endsOrStarts(value) && !allow(event.sender)) return;
       const message = parseBridgeMessage(value);
       if (!message) return;
-      if (message.t === "draft") client.record("renderer", message.draft);
-      else client.setAttributes(message.attributes);
+      if (message.t === "draft") client.record("renderer", message.draft, event.sender.id);
+      else if (message.t === "session") {
+        watch(event.sender);
+        client.sessionMessage("renderer", event.sender.id, message.session);
+      } else client.setAttributes(message.attributes);
     } catch (error) {
       warn("Observe could not accept a renderer message", error);
     }
   });
-  import_electron.ipcMain.handle(CHANNEL.hello, () => hello);
+  import_electron.ipcMain.handle(CHANNEL.hello, (event) => {
+    const sender = event.sender;
+    if (!greeted.has(sender)) {
+      greeted.add(sender);
+      sender.once("destroyed", () => greeted.delete(sender));
+    }
+    return hello();
+  });
   import_electron.ipcMain.handle(CHANNEL.flush, (event, value) => allow(event.sender) ? client.flush(parseFlushOptions(value)) : false);
 }
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
   captureException,
+  currentSessionHeaders,
+  defineSession,
   flush,
   init,
   log,

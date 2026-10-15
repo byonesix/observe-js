@@ -44,6 +44,7 @@ export interface ErrorDraft {
     readonly mechanism: Mechanism;
     readonly exceptions: readonly [ExceptionDraft, ...ExceptionDraft[]];
     readonly grouping_key?: string;
+    readonly session?: Uuid | null;
     readonly attributes: AttributeInput;
     readonly context: JsonObject;
 }
@@ -56,6 +57,7 @@ export interface LogDraft {
     readonly args?: readonly Json[];
     readonly channel?: string;
     readonly error_id?: Uuid;
+    readonly session?: Uuid | null;
     readonly attributes: AttributeInput;
     readonly context: JsonObject;
 }
@@ -79,21 +81,94 @@ export interface Clock {
     wallMs(): number;
     monoMs(): number;
 }
+export interface SessionRef {
+    readonly id: string;
+}
 export interface CaptureOptions {
     readonly attributes?: AttributeInput;
     readonly context?: Record<string, unknown>;
     readonly handled?: boolean;
     readonly groupingKey?: string;
+    readonly session?: SessionRef | null;
 }
 export interface LogOptions {
     readonly channel?: string;
     readonly attributes?: AttributeInput;
     readonly context?: Record<string, unknown>;
+    readonly session?: SessionRef | null;
 }
 export type JournalLine = string & {
     readonly [brand]: 'JournalLine';
 };
-export type SegmentClass = 'errors' | 'logs';
+export type SegmentClass = 'errors' | 'logs' | 'events';
+export type Token = string & {
+    readonly [brand]: 'Token';
+};
+export type StepKey = string & {
+    readonly [brand]: 'StepKey';
+};
+export type SessionResult = 'completed' | 'left';
+export type Owner = number | 'main';
+export type SessionMessage = {
+    readonly op: 'start';
+    readonly id: Uuid;
+    readonly type: Token;
+    readonly steps: readonly StepKey[];
+    readonly abandonAfterMs: number;
+    readonly concurrent: boolean;
+} | {
+    readonly op: 'screen';
+    readonly id: Uuid;
+    readonly name: Token;
+} | {
+    readonly op: 'action';
+    readonly id: Uuid;
+    readonly name: Token;
+    readonly variant?: Token;
+    readonly value?: number;
+} | {
+    readonly op: 'end';
+    readonly id: Uuid;
+    readonly result: SessionResult;
+    readonly reason?: Token;
+    readonly value?: number;
+    readonly currency?: string;
+};
+interface EventAt {
+    readonly session_id: Uuid;
+    readonly session_type: Token;
+    readonly seq: number;
+    readonly offset_ms: number;
+    readonly screen?: Token;
+}
+export type EventItem = (EventAt & {
+    readonly kind: 'start';
+    readonly steps: readonly StepKey[];
+    readonly abandon_after_ms: number;
+}) | (EventAt & {
+    readonly kind: 'screen';
+    readonly name: Token;
+}) | (EventAt & {
+    readonly kind: 'action';
+    readonly name: Token;
+    readonly variant?: Token;
+    readonly value?: number;
+}) | (EventAt & {
+    readonly kind: 'end';
+    readonly result: SessionResult;
+    readonly reason?: Token;
+    readonly value?: number;
+    readonly currency?: string;
+}) | {
+    readonly kind: 'interrupted';
+    readonly session_id: Uuid;
+    readonly session_type: Token;
+};
+export interface SessionMarker {
+    readonly id: Uuid;
+    readonly type: Token;
+    readonly attributes: Readonly<Record<string, string>>;
+}
 export interface FlushOptions {
     readonly timeoutMs?: number;
     readonly send?: boolean;

@@ -1,6 +1,6 @@
 # @byonesix/observe
 
-Sends errors and logs from an Electron app to Observe. Everything the app captures is written to disk before the capture call returns, and stays there until Observe accepts it. Data survives crashes, `kill -9`, `app.exit()`, updates and days offline.
+Sends errors, logs and customer sessions from an Electron app to Observe. Everything the app captures is written to disk before the capture call returns, and stays there until Observe accepts it. Data survives crashes, `kill -9`, `app.exit()`, updates and days offline.
 
 ## Requirements
 
@@ -11,7 +11,7 @@ Sends errors and logs from an Electron app to Observe. Everything the app captur
 ## Install
 
 ```sh
-bun add github:byonesix/observe-js#v0.1.0
+bun add github:byonesix/observe-js#v0.2.0
 ```
 
 This adds the package to `dependencies`. Keep it there, not in `devDependencies`: electron-builder packs only `dependencies`, and the main process loads the package from `node_modules` at runtime. The tag contains the built files, so no install script runs.
@@ -103,6 +103,70 @@ observe.log('warning', 'Printer offline', { channel: 'print', context: { printer
 
 To capture `console` calls instead of electron-log, pass `logs: { from: 'console', levels: ['warning', 'error'] }` to `init`. Use one or the other.
 
+## Sessions
+
+A session is one customer's visit, such as one customer placing an order. Define each session type once, in a window or in main:
+
+```ts
+import { defineSession } from '@byonesix/observe/electron/renderer'
+
+type Screen = 'order_type' | 'menu' | 'payment'
+type Action = 'order_type_chosen' | 'item_added' | 'payment_method_chosen'
+type Reason = 'next_order_tap' | 'idle_timeout' | 'customer_cancel'
+
+export const order = defineSession<Screen, Action, Reason>({
+  type: 'order',
+  steps: ['screen:order_type', 'action:item_added', 'screen:payment', 'end:completed'],
+  abandonAfterMs: 10 * 60_000,
+})
+```
+
+Start a session when a customer starts, and report what they see and do:
+
+```ts
+const session = order.start()
+session.screen('order_type')
+session.action('order_type_chosen', { variant: 'eat_in' })
+session.screen('menu')
+session.action('item_added', { variant: 'popular', value: 12.5 })
+session.screen('payment')
+session.action('payment_method_chosen', { variant: 'card' })
+session.complete('next_order_tap', { value: 18.4, currency: 'EUR' })
+```
+
+Code that does not hold the session finds it with `current()`, which returns the open session of that type or `null`:
+
+```ts
+order.current()?.leave('idle_timeout')
+```
+
+- `steps` is the Journey funnel in Observe, in order. A step is `screen:<name>`, `action:<name>`, `end:completed` or `end:left`. The type parameters make TypeScript reject a step, screen, action or reason the app did not declare. Without them, any name is accepted.
+- Names, variants and reasons match `^[a-z0-9_]{1,64}$`, and `type` matches `^[a-z0-9_]{1,32}$`. A call with another value does nothing and prints a warning once. `abandonAfterMs` is 1 minute to 24 hours, and 10 minutes when you leave it out.
+- `complete(reason?, { value?, currency? })` ends the session as completed. `leave(reason, { value?, currency? })` ends it as left and needs a reason. A currency needs a value. After the end, calls on the session do nothing.
+- `start()` ends the open session of the same type in the same window as left, with the reason `superseded`. Set `concurrent: true` for a type whose sessions overlap, such as several orders being prepared at once. A concurrent session is never linked to errors and logs on its own.
+- A window or main holds at most 64 open sessions, and a session takes at most 2,000 events, always keeping room for its end. A session that could not open has no headers and never links errors. Screens and actions share a limit of 200 at once and 20 a second per process. Starts and ends are never limited.
+- Every error and log captured while a session is open carries its `session_id`. In a window, that is the newest session the window started. In main, it is the newest session of any window. Pass `{ session }` to `captureException` or `log` to name one, or `{ session: null }` for none.
+- When a window reloads, navigates or crashes, main ends the sessions it started as left, with the reason `interrupted`. When the app is killed or loses power, the next launch ends them the same way. A second instance of the app leaves the sessions of a first instance that is still running alone. A session that nobody ends shows as unfinished in Observe once `abandonAfterMs` passes without an event.
+- Main numbers each event and times it on a monotonic clock, so a wrong system clock does not change durations. The SDK also corrects its wall clock by the `Date` header of Observe's replies when the two differ by more than 2 seconds, and uses the corrected clock for session ids and item times.
+
+### Link API calls to the session
+
+To show your API's requests in a session's timeline, send the session's headers with each call:
+
+```ts
+await fetch(`${api}/orders/${orderId}/pay`, { method: 'POST', headers: { ...session.headers(), 'content-type': 'application/json' }, body })
+```
+
+`session.headers()` returns a W3C `traceparent` that starts a new trace on each call, and `baggage: observe.session=<session id>`. The trace is not marked sampled, so the API's own sampling decides whether to keep its spans. Observe links the request to the session either way. An API client that does not hold the session can call `currentSessionHeaders()` instead. It returns the headers of the session that errors would link to, or `{}` when no session is open:
+
+```ts
+import { currentSessionHeaders } from '@byonesix/observe/electron/renderer'
+
+const response = await fetch(url, { headers: { ...currentSessionHeaders(), authorization: `Bearer ${token}` } })
+```
+
+A Laravel API with `byonesix/observe-laravel` continues the trace and sends the request, its spans, errors and logs with the session's id. If a window calls the API from another origin, allow the `traceparent` and `baggage` request headers in the API's CORS configuration.
+
 ## Flush
 
 Nothing is lost if you skip this. To send pending data before a restart:
@@ -144,9 +208,10 @@ With `sandbox: true`, a preload cannot `require` packages from `node_modules`. B
 
 ## How data reaches Observe
 
-- The queue lives in `<userData>/observe/queue`. Each file is one envelope: errors are sent about 1 second after capture, logs about every 30 seconds.
+- The queue lives in `<userData>/observe/queue`. Each file is one envelope: errors are sent about 1 second after capture, logs about every 30 seconds, and session events about every 30 seconds and at once when a session ends.
+- Each open session has a file in `<userData>/observe/sessions` until its end is on disk. The next launch ends the sessions it finds there as interrupted.
 - An error is flushed to the storage device right after it is written, logs at least every 5 seconds. A power cut loses at most the last 5 seconds of logs.
-- The queue keeps at most 50 MB or 2,000 files, dropping the oldest logs first, and drops data older than 6 days.
+- The queue keeps at most 50 MB or 2,000 files, dropping the oldest logs first, then session events, then errors, and drops data older than 6 days.
 - A failed send backs off from 5 seconds to 5 minutes. A rejected key pauses sending for an hour. Observe's `Retry-After` is honoured. Nothing is deleted because of a wrong endpoint.
 - Retries reuse the same batch id, which Observe uses to drop a duplicate insert.
 

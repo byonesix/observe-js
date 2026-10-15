@@ -3,6 +3,7 @@ import type { Clock } from './model';
 export interface HttpReply {
     readonly status: number;
     readonly retryAfterSeconds?: number;
+    readonly dateMs?: number;
 }
 export interface Transport {
     post(json: string, timeoutMs: number): Promise<HttpReply>;
@@ -53,13 +54,14 @@ export declare class Delivery {
     private readonly policy;
     private readonly clock;
     private readonly random;
+    private readonly serverTime;
     private health;
     private running;
     private rerun;
     private offline;
     private rejected;
     private readonly spacing;
-    constructor(journal: Journal, transport: Transport, connectivity: Connectivity, policy: DeliveryPolicy, clock: Clock, random: () => number);
+    constructor(journal: Journal, transport: Transport, connectivity: Connectivity, policy: DeliveryPolicy, clock: Clock, random: () => number, serverTime?: (dateMs: number) => void);
     tick(): void;
     wake(): void;
     drain(deadlineMs: number): Promise<boolean>;

@@ -1,5 +1,7 @@
 import type { AttributeInput, Level } from '../core/model';
 import { type ElectronLogLevel, type ElectronLogLike } from './hooks';
+export { currentSessionHeaders, defineSession } from '../core/define-session';
+export type { ActionOptions, EndOptions, Session, SessionDefinition, SessionHeaders, SessionKind, SessionStep } from '../core/define-session';
 export { captureException, flush, log, setAttributes } from '../core/hub';
 export type { AttributeInput, CaptureOptions, FlushOptions, Level, LogOptions } from '../core/model';
 export type { ElectronLogLevel, ElectronLogLike } from './hooks';

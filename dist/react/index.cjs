@@ -37,11 +37,12 @@ function format(bytes) {
 }
 var lastMs = -1;
 var counter = 0;
+var MAX_HOLD_MS = 1e3;
 function uuidv7(wallMs) {
   const bytes = new Uint8Array(16);
   globalThis.crypto.getRandomValues(bytes);
   let ms = Math.max(0, Math.floor(wallMs));
-  if (ms <= lastMs) {
+  if (ms <= lastMs && lastMs - ms <= MAX_HOLD_MS) {
     ms = lastMs;
     counter++;
     if (counter > 4095) {
@@ -416,8 +417,8 @@ function location(raw) {
 }
 
 // src/core/capture.ts
-function errorDraft(error, how, env2) {
-  const wall = env2.clock.wallMs();
+function errorDraft(error, how, env) {
+  const wall = env.clock.wallMs();
   const context = contextOf(how.context);
   const fields = readError(error);
   const exceptions = fields ? chain(error, fields, context) : thrown(error, how.mechanism, context);
@@ -429,6 +430,7 @@ function errorDraft(error, how, env2) {
     mechanism: how.mechanism,
     exceptions,
     ...how.groupingKey === void 0 ? {} : { grouping_key: cutUtf8(how.groupingKey, LIMITS.nameBytes * LIMITS.capture) },
+    ...how.session === void 0 ? {} : { session: how.session },
     attributes: boundAttributes(how.attributes ?? {}),
     context: fitJson(context, LIMITS.contextBytes * LIMITS.capture)
   };
@@ -496,9 +498,14 @@ function registry() {
   return current;
 }
 var preInitHub = {
+  clock: systemClock,
   submit(draft) {
     return defer((hub) => hub.submit(draft));
   },
+  session(message) {
+    return defer((hub) => hub.session(message));
+  },
+  ambient: () => void 0,
   setAttributes(attributes) {
     defer((hub) => hub.setAttributes(attributes));
   },
@@ -515,10 +522,9 @@ function defer(call) {
 function currentHub() {
   return registry().hub ?? preInitHub;
 }
-var env = { clock: systemClock };
 function captureError(error, how, hub = currentHub()) {
   try {
-    const draft = errorDraft(error, how, env);
+    const draft = errorDraft(error, how, hub);
     return hub.submit(draft) ? draft.id : void 0;
   } catch {
     return void 0;
