@@ -11,7 +11,7 @@ Sends errors, logs and customer sessions from an Electron app to Observe. Everyt
 ## Install
 
 ```sh
-bun add github:byonesix/observe-js#v0.2.0
+bun add github:byonesix/observe-js#v0.2.1
 ```
 
 This adds the package to `dependencies`. Keep it there, not in `devDependencies`: electron-builder packs only `dependencies`, and the main process loads the package from `node_modules` at runtime. The tag contains the built files, so no install script runs.

@@ -1,6 +1,6 @@
 {
   "name": "@byonesix/observe",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Sends errors and logs from an Electron app to Observe.",
   "license": "MIT",
   "sideEffects": false,

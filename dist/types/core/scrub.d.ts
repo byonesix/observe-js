@@ -1,6 +1,7 @@
 import type { Json } from './model';
 export declare const REPLACEMENT = "[scrubbed]";
 export declare const DEFAULT_KEYS: readonly string[];
+export declare function cardExempt(key: string | null): boolean;
 export declare class Scrubber {
     private readonly keys;
     private readonly verdicts;

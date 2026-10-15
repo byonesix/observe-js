@@ -701,7 +701,7 @@ function attributes(input, scrubber) {
 }
 function scrubbed(raw, key, value, scrubber) {
   if (scrubber.matchesKey(raw) || scrubber.matchesKey(key)) return REPLACEMENT;
-  return truncateUtf8(scrubber.text(value), LIMITS.attributeBytes);
+  return truncateUtf8(scrubber.text(value, !cardExempt(raw)), LIMITS.attributeBytes);
 }
 function boundAttributes(input) {
   const out = {};
@@ -2933,7 +2933,7 @@ function start(options) {
     service: options.service,
     release: options.release ?? import_electron.app.getVersion(),
     host: readOrCreateInstallId(dir),
-    sdk: { name: "observe-js", version: "0.2.0" },
+    sdk: { name: "observe-js", version: "0.2.1" },
     runtime: { name: "electron", version: process.versions.electron ?? "" },
     attributes: attributes(
       {
